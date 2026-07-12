@@ -1,7 +1,6 @@
 # go-boilerplate
 
 [![CI](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml/badge.svg)](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/GtFoBAE05/go-boilerplate)](https://goreportcard.com/report/github.com/GtFoBAE05/go-boilerplate)
 ![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)
 
 Production-ready Go HTTP API boilerplate: clone it, rename the module, copy the
