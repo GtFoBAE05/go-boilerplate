@@ -1,6 +1,6 @@
 module go-boilerplate
 
-go 1.25.8
+go 1.25.12
 
 require (
 	github.com/exaring/otelpgx v0.11.1
