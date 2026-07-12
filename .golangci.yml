@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - gocritic
+    - misspell
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+  exclusions:
+    generated: lax
+    paths:
+      - internal/repository # sqlc-generated
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      # The module path has no dot, so without this gofumpt's heuristic
+      # mistakes our own imports for standard library and fights goimports
+      # over import grouping.
+      module-path: go-boilerplate
+    goimports:
+      local-prefixes:
+        - go-boilerplate
