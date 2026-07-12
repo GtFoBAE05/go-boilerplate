@@ -1,0 +1,131 @@
+//go:build integration
+
+// This is the one exemplary integration test in the repo: copy it as the
+// template for testing a new resource against a real Postgres. It spins
+// postgres:16-alpine via testcontainers, applies the goose migrations (so it
+// also guards that migrations still create a working schema), and exercises a
+// full CRUD vertical through the sqlc Store.
+//
+// Guarded by the `integration` build tag so `go test ./...` stays fast and
+// Docker-free; run it with `make test-integration`.
+package repository_test
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+
+	"go-boilerplate/internal/postgres"
+	"go-boilerplate/internal/repository"
+	"go-boilerplate/internal/service"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+// setupPool starts a throwaway Postgres, migrates it, and returns a live pool.
+// Registered cleanups terminate the container and close the pool.
+func setupPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+
+	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("app"),
+		tcpostgres.WithUsername("app"),
+		tcpostgres.WithPassword("app"),
+		testcontainers.WithWaitStrategy(
+			wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second),
+		),
+	)
+	if err != nil {
+		t.Fatalf("start postgres container: %v", err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
+
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// Reuse the production migration path — this doubles as a migration test.
+	if err := postgres.Migrate(ctx, pool, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return pool
+}
+
+func TestUserRepositoryCRUD(t *testing.T) {
+	ctx := context.Background()
+	store := repository.NewStore(setupPool(t))
+
+	// Create
+	created, err := store.CreateUser(ctx, repository.CreateUserParams{
+		Name:  "alice",
+		Email: "alice@example.com",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.ID == 0 || created.Name != "alice" || created.Email != "alice@example.com" {
+		t.Fatalf("unexpected created row: %+v", created)
+	}
+	if created.CreatedAt.IsZero() {
+		t.Fatalf("created_at not populated")
+	}
+
+	// Get by id
+	got, err := store.GetUser(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ID != created.ID || got.Email != created.Email {
+		t.Fatalf("get mismatch: got %+v want %+v", got, created)
+	}
+
+	// Duplicate email violates the UNIQUE constraint, and the raw storage error
+	// must map to the domain error the service layer relies on.
+	_, err = store.CreateUser(ctx, repository.CreateUserParams{
+		Name:  "alice2",
+		Email: "alice@example.com",
+	})
+	if err == nil {
+		t.Fatalf("duplicate email: want error, got nil")
+	}
+	if !service.IsUniqueViolation(err) {
+		t.Fatalf("duplicate email: want unique violation, got %v", err)
+	}
+
+	// List with limit/offset: add a second user, page through.
+	second, err := store.CreateUser(ctx, repository.CreateUserParams{
+		Name:  "bob",
+		Email: "bob@example.com",
+	})
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	list, err := store.ListUsers(ctx, repository.ListUsersParams{Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != second.ID {
+		t.Fatalf("list limit/offset: want [%d], got %+v", second.ID, list)
+	}
+
+	// Delete, then confirm the row is gone (ErrNoRows).
+	if err := store.DeleteUser(ctx, created.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := store.GetUser(ctx, created.ID); err != pgx.ErrNoRows {
+		t.Fatalf("get after delete: want pgx.ErrNoRows, got %v", err)
+	}
+}
