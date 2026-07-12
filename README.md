@@ -1,9 +1,43 @@
 # go-boilerplate
 
-Production-ready Go HTTP API boilerplate. Follows the community-standard layout
+[![CI](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml/badge.svg)](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/GtFoBAE05/go-boilerplate)](https://goreportcard.com/report/github.com/GtFoBAE05/go-boilerplate)
+![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)
+
+Production-ready Go HTTP API boilerplate: clone it, rename the module, copy the
+example resource, and start writing business logic. Community-standard layout
 (thin `cmd/`, private code in `internal/`, flat packages — no over-nesting).
 
+## Features
+
+- **Type-safe SQL** — [sqlc](https://sqlc.dev) generates Go from raw SQL; no ORM, no reflection
+- **Versioned migrations** — [goose](https://github.com/pressly/goose) files embedded in the binary, applied at boot (or from CI in prod)
+- **Cache-aside Redis** — optional by config: disabled / degrade-gracefully / required
+- **Full observability** — OTel traces (handler → service → SQL/Redis), Prometheus metrics, trace-correlated `slog` logs
+- **Hardened HTTP** — single response envelope, per-IP rate limiting, request timeouts, 1 MiB body cap, strict JSON validation
+- **Private pprof** — profiling on a localhost-only port, never on the public API
+- **Guardrail CI** — lint (pinned version), race tests, testcontainers integration suite, `govulncheck`, sqlc drift check, Dependabot
+- **Graceful shutdown** — bounded drain for HTTP, OTel flush, and connections
+
+## Architecture
+
+```mermaid
+flowchart LR
+    C[Client] --> M[chi router\nrequest-id · logging · recover\ntimeout · rate limit]
+    M --> H[handler\ndecode · validate · envelope]
+    H --> S[service\nbusiness logic · domain errors]
+    S -->|cache-aside| R[(Redis)]
+    S --> Q[repository\nsqlc + pgx]
+    Q --> P[(Postgres)]
+```
+
+Every layer owns one job: handlers never touch the database, services never
+touch HTTP, repositories never contain business rules. Domain errors flow up
+and are mapped to HTTP exactly once (`internal/handler/respond.go`).
+
 ## Quickstart
+
+Prerequisites: Go 1.25+, Docker.
 
 ```bash
 docker compose up -d      # postgres + redis + jaeger + prometheus + otel-collector
@@ -13,16 +47,22 @@ go run ./cmd/api          # or: make run — applies goose migrations at boot
 Postgres binds host port **5433** and Redis **6380** (not the defaults) so they
 never collide with natively installed instances.
 
-Try it:
+### Endpoints
+
+| Method | Path                 | Description                              |
+| ------ | -------------------- | ---------------------------------------- |
+| POST   | `/api/v1/users`      | Create user (409 on duplicate email)     |
+| GET    | `/api/v1/users/{id}` | Get user (second call served from Redis) |
+| GET    | `/api/v1/users`      | List users (`?limit=&offset=`)           |
+| PATCH  | `/api/v1/users/{id}` | Partial update (name and/or email)       |
+| DELETE | `/api/v1/users/{id}` | Delete user                              |
+| GET    | `/healthz`           | Liveness probe                           |
+| GET    | `/readyz`            | Readiness (pings postgres + redis)       |
+| GET    | `/metrics`           | Prometheus metrics                       |
 
 ```bash
 curl -X POST localhost:8080/api/v1/users -d '{"name":"alice","email":"alice@example.com"}'
-curl localhost:8080/api/v1/users/1        # second call hits Redis
-curl localhost:8080/api/v1/users?limit=10
-curl -X PATCH localhost:8080/api/v1/users/1 -d '{"name":"alicia"}'   # partial update
-curl -X DELETE localhost:8080/api/v1/users/1
-curl localhost:8080/healthz               # liveness
-curl localhost:8080/readyz                # readiness (pings postgres + redis)
+curl localhost:8080/api/v1/users/1
 ```
 
 ## Stack
@@ -64,9 +104,6 @@ db/
 deploy/               Prometheus + OTel collector configs for the local stack
 ```
 
-Request flow: `handler → service → repository (sqlc/pgx)`, with `service`
-consulting Redis before Postgres on reads.
-
 ## API behavior
 
 ### Response envelope
@@ -92,8 +129,7 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
 - **Rate limiting**: the `/api/v1` subtree is limited per client IP via
   [httprate](https://github.com/go-chi/httprate); probes and `/metrics` are
   never limited. Over the limit → `429` with the `RATE_LIMITED` envelope.
-  Configure under `ratelimit` (`enabled`, `rps`, `burst` = max requests per 1s
-  window); disable with `APP_RATELIMIT_ENABLED=false`.
+  Configure under `ratelimit`; disable with `APP_RATELIMIT_ENABLED=false`.
 - **Timeouts**: every request gets a context deadline (`server.request_timeout`);
   downstream pgx/redis calls abort when it fires.
 
@@ -111,11 +147,8 @@ entirely through env.
 - **Redis is a soft dependency**, controlled by `redis.mode`:
   - `disabled` — no Redis at all, service runs uncached.
   - `optional` (default) — log a warning and degrade to uncached reads
-    when unreachable; `/readyz` reports Redis as `degraded` but stays 200,
-    since the app can still serve traffic without its cache.
+    when unreachable; `/readyz` reports Redis as `degraded` but stays 200.
   - `required` — unreachable Redis is fatal at startup.
-
-  Any other value fails config validation at startup.
 
 ## Observability
 
@@ -163,5 +196,18 @@ so nothing is kept in sync by hand.
      `server.Deps`, mount the routes in `internal/server/server.go` —
      `cmd/` and `app.go` stay untouched.
 - **New binary** (worker, cron): add `cmd/<name>/main.go`, reuse `internal/`.
-- **Auth / CORS / trusted-proxy handling**: deliberately not included — add
-  middleware in `internal/server/` to fit your deployment.
+
+## Philosophy
+
+A boilerplate should make the decisions everyone agrees on and leave the
+contested ones to you. Deliberately **not** included:
+
+- **Auth** — JWT vs sessions vs an external provider is a per-project decision
+- **Swagger/OpenAPI** — annotation noise; pick your own spec workflow
+- **Mock generators** — interfaces + hand-written fakes are enough (see the tests)
+- **CORS / trusted-proxy handling** — depends on your deployment topology;
+  add middleware in `internal/server/` to fit it
+- **gRPC / message queues / workers** — add them when you need them
+
+One complete example vertical (`user`) is the documentation: copy it, rename
+it, ship. AI coding agents get their own guidance in [AGENTS.md](AGENTS.md).
