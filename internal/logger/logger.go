@@ -1,5 +1,5 @@
-// Package logger builds the application's slog.Logger: level and format from
-// config, with trace_id/span_id attached automatically inside traced requests.
+// Package logger builds the application's slog.Logger from a level and
+// options, with trace_id/span_id attached automatically inside traced requests.
 package logger
 
 import (
@@ -8,28 +8,53 @@ import (
 	"os"
 	"strings"
 
-	"go-boilerplate/internal/config"
-
 	"go.opentelemetry.io/otel/trace"
 )
 
-// New builds a slog.Logger from config: JSON (production) or text (local),
-// with the level parsed from config ("debug", "info", "warn", "error").
-// Every record logged with a *Context method gets trace_id/span_id attached
-// automatically when the context carries an active span.
-func New(cfg config.LogConfig, appEnv string) *slog.Logger {
-	level := parseLevel(cfg.Level)
+// Option tunes the logger. Unset options mean JSON output and no env
+// attribute, so New(level) alone yields a usable production logger.
+type Option func(*options)
 
-	opts := &slog.HandlerOptions{Level: level}
+type options struct {
+	format string
+	env    string
+}
 
-	var handler slog.Handler
-	if strings.EqualFold(cfg.Format, "text") {
-		handler = slog.NewTextHandler(os.Stdout, opts)
-	} else {
-		handler = slog.NewJSONHandler(os.Stdout, opts)
+// Format selects the handler: "text" for local development, anything else
+// (conventionally "json") for structured output.
+func Format(f string) Option {
+	return func(o *options) { o.format = f }
+}
+
+// Env stamps every record with an "env" attribute identifying the deployment.
+func Env(e string) Option {
+	return func(o *options) { o.env = e }
+}
+
+// New builds a slog.Logger at the given level ("debug", "info", "warn",
+// "error"; anything else means info). Every record logged with a *Context
+// method gets trace_id/span_id attached automatically when the context
+// carries an active span.
+func New(level string, opts ...Option) *slog.Logger {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
 	}
 
-	return slog.New(traceHandler{handler}).With("env", appEnv)
+	handlerOpts := &slog.HandlerOptions{Level: parseLevel(level)}
+
+	var handler slog.Handler
+	if strings.EqualFold(o.format, "text") {
+		handler = slog.NewTextHandler(os.Stdout, handlerOpts)
+	} else {
+		handler = slog.NewJSONHandler(os.Stdout, handlerOpts)
+	}
+
+	log := slog.New(traceHandler{handler})
+	if o.env != "" {
+		log = log.With("env", o.env)
+	}
+	return log
 }
 
 // traceHandler decorates a slog.Handler with trace correlation, so any log

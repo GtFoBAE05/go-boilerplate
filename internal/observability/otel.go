@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"go-boilerplate/internal/config"
-
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
@@ -19,14 +17,42 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 )
 
+// Option enables optional telemetry pipelines. Metrics are always on;
+// tracing only when WithTracing is passed.
+type Option func(*options)
+
+type options struct {
+	tracing *tracingOptions
+}
+
+type tracingOptions struct {
+	endpoint    string
+	insecure    bool
+	sampleRatio float64
+}
+
+// WithTracing exports spans over OTLP/gRPC to endpoint. Passing this option
+// is what turns tracing on — the caller decides from its own config whether
+// to include it.
+func WithTracing(endpoint string, insecure bool, sampleRatio float64) Option {
+	return func(o *options) {
+		o.tracing = &tracingOptions{endpoint: endpoint, insecure: insecure, sampleRatio: sampleRatio}
+	}
+}
+
 // Setup installs global tracer and meter providers. The returned function
 // flushes and shuts down every provider; call it on process exit.
-func Setup(ctx context.Context, cfg *config.Config) (func(context.Context) error, error) {
+func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(context.Context) error, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	res, err := resource.New(ctx,
 		resource.WithTelemetrySDK(),
 		resource.WithAttributes(
-			semconv.ServiceName(cfg.App.Name),
-			semconv.DeploymentEnvironmentName(cfg.App.Env),
+			semconv.ServiceName(serviceName),
+			semconv.DeploymentEnvironmentName(env),
 		),
 	)
 	if err != nil {
@@ -49,9 +75,9 @@ func Setup(ctx context.Context, cfg *config.Config) (func(context.Context) error
 	shutdowns = append(shutdowns, meterProvider.Shutdown)
 
 	// Traces: OTLP over gRPC (Jaeger, Tempo, or any OTLP collector).
-	if cfg.Otel.Enabled {
-		traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.Otel.Endpoint)}
-		if cfg.Otel.Insecure {
+	if t := o.tracing; t != nil {
+		traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(t.endpoint)}
+		if t.insecure {
 			traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		}
 		traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
@@ -61,7 +87,7 @@ func Setup(ctx context.Context, cfg *config.Config) (func(context.Context) error
 		tracerProvider := sdktrace.NewTracerProvider(
 			sdktrace.WithBatcher(traceExporter),
 			sdktrace.WithResource(res),
-			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.Otel.SampleRatio))),
+			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(t.sampleRatio))),
 		)
 		otel.SetTracerProvider(tracerProvider)
 		shutdowns = append(shutdowns, tracerProvider.Shutdown)

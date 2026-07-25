@@ -34,10 +34,19 @@ func Run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	log := logger.New(cfg.Log, cfg.App.Env)
+	log := logger.New(cfg.Log.Level, logger.Format(cfg.Log.Format), logger.Env(cfg.App.Env))
 	slog.SetDefault(log)
 
-	shutdownOtel, err := observability.Setup(ctx, cfg)
+	// Config is unpacked here, at the single composition root: the infra
+	// packages below take plain values, so they stay usable from tests and
+	// tools that never load a config.Config.
+	var otelOpts []observability.Option
+	if cfg.Otel.Enabled {
+		otelOpts = append(otelOpts, observability.WithTracing(
+			cfg.Otel.Endpoint, cfg.Otel.Insecure, cfg.Otel.SampleRatio,
+		))
+	}
+	shutdownOtel, err := observability.Setup(ctx, cfg.App.Name, cfg.App.Env, otelOpts...)
 	if err != nil {
 		return fmt.Errorf("setup observability: %w", err)
 	}
@@ -51,7 +60,11 @@ func Run() error {
 		}
 	}()
 
-	pool, err := postgres.NewPool(ctx, cfg.Postgres)
+	pool, err := postgres.NewPool(ctx, cfg.Postgres.DSN,
+		postgres.MaxConns(cfg.Postgres.MaxConns),
+		postgres.MinConns(cfg.Postgres.MinConns),
+		postgres.MaxConnLifetime(cfg.Postgres.MaxConnLifetime),
+	)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
@@ -75,7 +88,10 @@ func Run() error {
 	case config.RedisModeDisabled:
 		log.Info("redis disabled, running without cache")
 	default:
-		client, err := redis.New(ctx, cfg.Redis)
+		client, err := redis.New(ctx, cfg.Redis.Addr,
+			redis.Password(cfg.Redis.Password),
+			redis.DB(cfg.Redis.DB),
+		)
 		if err != nil {
 			if cfg.Redis.Mode == config.RedisModeRequired {
 				return fmt.Errorf("connect redis (required): %w", err)
@@ -89,7 +105,8 @@ func Run() error {
 		}
 	}
 
-	srv := server.New(cfg, log, buildDeps(pool, rdb, svcCache, log))
+	redisRequired := cfg.Redis.Mode == config.RedisModeRequired
+	srv := server.New(cfg, log, buildDeps(pool, rdb, redisRequired, svcCache, log))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Start() }()

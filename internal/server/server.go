@@ -56,6 +56,9 @@ type Deps struct {
 	// disabled or unreachable in optional mode.
 	Pool  *pgxpool.Pool
 	Redis *goredis.Client
+	// RedisRequired makes a failing Redis ping fail /readyz. The caller
+	// derives it from redis.mode; the server never reads config for it.
+	RedisRequired bool
 }
 
 // New assembles the router — middleware chain, probes, /metrics, and every
@@ -87,7 +90,7 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	required := map[string]health.Pinger{"postgres": deps.Pool}
 	optional := map[string]health.Pinger{}
 	if deps.Redis != nil {
-		if cfg.Redis.Mode == config.RedisModeRequired {
+		if deps.RedisRequired {
 			required["redis"] = redisPinger{rdb: deps.Redis}
 		} else {
 			optional["redis"] = redisPinger{rdb: deps.Redis}
