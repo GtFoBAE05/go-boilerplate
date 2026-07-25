@@ -221,7 +221,13 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"bad redis mode", func(c *Config) { c.Redis.Mode = "maybe" }, "redis.mode"},
 		{"bad log level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 		{"bad log format", func(c *Config) { c.Log.Format = "xml" }, "log.format"},
-		{"sample ratio above 1", func(c *Config) { c.Tracing.SampleRatio = 1.5 }, "tracing.sample_ratio"},
+		{"sampler arg above 1", func(c *Config) { c.OTel.TracesSamplerArg = 1.5 }, "otel.traces_sampler_arg"},
+		{"unknown sampler", func(c *Config) { c.OTel.TracesSampler = "jaeger_remote" }, "otel.traces_sampler"},
+		{"unknown exporter", func(c *Config) { c.OTel.MetricsExporter = "prometheus" }, "otel.metrics_exporter"},
+		// The pre-OTLP spelling: a bare host:port has no scheme, so nothing
+		// decides whether the connection is encrypted.
+		{"endpoint without scheme", func(c *Config) { c.OTel.Endpoint = "localhost:4317" }, "scheme"},
+		{"zero metric interval", func(c *Config) { c.OTel.MetricExportIntervalMillis = 0 }, "otel.metric_export_interval"},
 		{"zero ratelimit requests", func(c *Config) { c.RateLimit.Requests = 0 }, "ratelimit.requests"},
 	}
 
@@ -270,6 +276,40 @@ func TestDisabledPprofSettingsAreInert(t *testing.T) {
 
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("disabled pprof must not be validated: %v", err)
+	}
+}
+
+// OTEL_METRIC_EXPORT_INTERVAL is milliseconds per the OTel spec, not a Go
+// duration like every other interval in this config. Getting this wrong is
+// silent: "60000" read as nanoseconds would push 16000 times a second.
+func TestMetricExportIntervalIsMilliseconds(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, DotEnvFile),
+		[]byte("OTEL_METRIC_EXPORT_INTERVAL=15000\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	t.Chdir(dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.OTel.MetricExportInterval(); got != 15*time.Second {
+		t.Fatalf("OTEL_METRIC_EXPORT_INTERVAL=15000 must mean 15s, got %s", got)
+	}
+}
+
+// A disabled signal's settings are inert, so a deployment that exports nothing
+// is not blocked by an endpoint it never dials.
+func TestDisabledOTelSettingsAreInert(t *testing.T) {
+	cfg := validConfig()
+	cfg.OTel.SDKDisabled = true
+	cfg.OTel.Endpoint = "not a url"
+	cfg.OTel.TracesSampler = "nonsense"
+	cfg.OTel.MetricExportIntervalMillis = 0
+
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("disabled telemetry must not be validated: %v", err)
 	}
 }
 
@@ -344,9 +384,13 @@ func validConfig() *Config {
 			DSN: "postgres://app:app@localhost:5433/app", MaxConns: 25, MinConns: 2,
 			MaxConnLifetime: time.Hour, QueryExecMode: "cache_statement",
 		},
-		Redis:     RedisConfig{Mode: RedisModeOptional, Addr: "localhost:6380"},
-		Cache:     CacheConfig{DefaultTTL: 5 * time.Minute},
-		Tracing:   TracingConfig{Enabled: true, Endpoint: "localhost:4317", SampleRatio: 1.0},
+		Redis: RedisConfig{Mode: RedisModeOptional, Addr: "localhost:6380"},
+		Cache: CacheConfig{DefaultTTL: 5 * time.Minute},
+		OTel: OTelConfig{
+			TracesExporter: OTelExporterOTLP, MetricsExporter: OTelExporterOTLP,
+			Endpoint: "http://localhost:4317", TracesSampler: "parentbased_traceidratio",
+			TracesSamplerArg: 1.0, MetricExportIntervalMillis: 60000,
+		},
 		Log:       LogConfig{Level: "info", Format: "json"},
 		RateLimit: RateLimitConfig{Enabled: true, Requests: 40, Window: time.Second},
 	}

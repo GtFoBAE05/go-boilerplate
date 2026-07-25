@@ -41,6 +41,13 @@ func New(ctx context.Context, addr string, opts ...Option) (*goredis.Client, err
 		return nil, fmt.Errorf("instrument redis tracing: %w", err)
 	}
 
+	// Traces answer "why was this call slow"; these answer "is the pool starved".
+	// Reads the global meter provider, so telemetry must be set up first.
+	if err := redisotel.InstrumentMetrics(client); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("instrument redis metrics: %w", err)
+	}
+
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := client.Ping(pingCtx).Err(); err != nil {

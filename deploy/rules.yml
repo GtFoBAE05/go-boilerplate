@@ -1,0 +1,120 @@
+# Recording and alerting rules for the metrics this app pushes over OTLP.
+#
+# The app exposes no /metrics: it pushes to the collector, and Prometheus
+# scrapes the collector. Series names below are the OTLP instrument names after
+# the collector's Prometheus translation (dots to underscores, unit suffix,
+# _total on monotonic counters) — the instrument names were verified against a
+# live export, the translation follows the OTLP-to-Prometheus spec.
+#
+# Two labels are load-bearing and come from the app's resource attributes, not
+# from the scrape: job (service.name) and instance (service.instance.id, set to
+# the hostname). prometheus.yml must keep honor_labels: true or Prometheus
+# overwrites both with the collector's own identity and every replica merges
+# into one series.
+#
+# Recording rules exist so a dashboard panel and an alert evaluate the same
+# expression: a threshold that disagrees with the graph it is drawn on is how an
+# on-call ends up debugging the query instead of the incident.
+
+groups:
+  - name: app-recording
+    interval: 30s
+    rules:
+      # Fraction of requests answered 5xx. 4xx is deliberately excluded: a
+      # client sending bad input is not this service failing, and folding it in
+      # means a single misbehaving caller can page the on-call.
+      - record: job:http_requests:error_ratio5m
+        expr: |
+          sum by (job) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+            /
+          sum by (job) (rate(http_server_request_duration_seconds_count[5m]))
+
+      - record: job:http_request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (job, le) (rate(http_server_request_duration_seconds_bucket[5m])))
+
+      # Pool utilisation as a 0-1 fraction, so the alert threshold below is
+      # independent of POSTGRES_MAX_CONNS.
+      - record: instance:pgxpool_connections:utilization
+        expr: |
+          sum by (job, instance) (pgxpool_acquired_connections)
+            /
+          sum by (job, instance) (pgxpool_max_connections)
+
+  - name: app-alerts
+    rules:
+      # Push has no `up`: nothing polls the app, so no scrape can fail. The
+      # closest signal is the disappearance of a series that always exists
+      # while the process runs — goroutine count is reported every export
+      # interval regardless of traffic.
+      #
+      # This is strictly weaker than a scrape failure and the alert says so:
+      # a dead app, a dead collector, and a broken network between them all
+      # look identical here. CollectorDown below is what tells them apart, and
+      # in Kubernetes the liveness probe — not this rule — is what restarts a
+      # wedged process.
+      #
+      # The window must outlast OTEL_METRIC_EXPORT_INTERVAL by a comfortable
+      # margin; at the 60s default, 3m is two missed exports.
+      - alert: AppMetricsMissing
+        expr: absent(go_goroutine_count{job="go-boilerplate"})
+        for: 3m
+        labels:
+          severity: page
+        annotations:
+          summary: "No metrics from go-boilerplate for 3 minutes"
+          description: "The app, the collector, or the path between them is broken. Check CollectorDown first — if it is also firing, this is the collector, not the app."
+
+      # The collector is the only real scrape target left, so this is the one
+      # alert that still rests on `up`. It fires for a pipeline outage, during
+      # which every other rule here goes blind rather than false.
+      - alert: CollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "OTLP collector is not scrapeable"
+          description: "All metrics stop at once while this is firing; treat other alerts' silence as unknown, not healthy."
+
+      - alert: HighErrorRate
+        expr: job:http_requests:error_ratio5m > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of requests are 5xx"
+          description: "Break down by http_route and http_response_status_code, then follow a trace_id from the error logs."
+
+      # 10m rather than 5m: latency alerts are the noisiest kind, and a slow
+      # window that resolves itself is not worth waking someone for.
+      - alert: HighLatencyP99
+        expr: job:http_request_duration_seconds:p99_5m > 1
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "p99 latency is {{ $value | humanizeDuration }}"
+          description: "Check pool utilization first — an exhausted pool shows up as latency inside the acquire, not as an error."
+
+      - alert: PostgresPoolSaturated
+        expr: instance:pgxpool_connections:utilization > 0.9
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.instance }} is using {{ $value | humanizePercentage }} of its Postgres pool"
+          description: "Either raise POSTGRES_MAX_CONNS or find the query holding connections; at 100% every new request queues."
+
+      # Waiting for a connection means the pool was empty at acquire time. This
+      # is the leading indicator: it climbs before utilization pins at 1 and
+      # before latency crosses any SLO.
+      - alert: PostgresPoolStarved
+        expr: rate(pgxpool_empty_acquire_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.instance }} waits on an empty Postgres pool {{ $value | printf \"%.1f\" }} times/s"
+          description: "Requests are queueing for a connection. Precedes PostgresPoolSaturated."

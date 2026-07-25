@@ -6,10 +6,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
 	"go-boilerplate/internal/config"
+
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 
 	usersvc "go-boilerplate/internal/service/user"
 )
@@ -80,7 +88,7 @@ func TestRateLimitEnvelope(t *testing.T) {
 func TestProbesNotRateLimited(t *testing.T) {
 	h := newTestServer(t)
 
-	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+	for _, path := range []string{"/healthz", "/readyz"} {
 		for i := 0; i < 5; i++ {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.RemoteAddr = "203.0.113.5:1234"
@@ -93,16 +101,101 @@ func TestProbesNotRateLimited(t *testing.T) {
 	}
 }
 
-// /metrics is served on the public router (a scraper reaches it from off-host),
-// so it must at least answer there.
-func TestMetricsOnPublicRouter(t *testing.T) {
+// Metrics leave over OTLP. Re-adding a scrape endpoint would put route
+// patterns, latency distributions and pool sizes back on a public port.
+func TestNoMetricsEndpointOnPublicRouter(t *testing.T) {
 	h := newTestServer(t)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("/metrics: want 200, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/metrics must not be served; metrics are pushed over OTLP, got %d", rec.Code)
+	}
+}
+
+// Without routePattern feeding otelhttp's Labeler, every endpoint lands in one
+// latency histogram and per-route alerting is impossible.
+func TestRequestMetricsCarryRoutePattern(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+	// Built after the provider is installed: otelhttp resolves its meter once,
+	// when the handler is constructed.
+	h := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	// An unmatched path must contribute no route, or a scanner walking random
+	// URLs mints a series per path.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/nope/12345", nil))
+
+	routes := recordedRoutes(t, reader)
+	if !slices.Contains(routes, "/api/v1/users") {
+		t.Fatalf("want an http.route=/api/v1/users data point, got routes %q", routes)
+	}
+	if slices.Contains(routes, "/nope/12345") {
+		t.Fatalf("unmatched path leaked into http.route: %q", routes)
+	}
+}
+
+// recordedRoutes returns the http.route attribute of every request-duration
+// data point, with the empty string standing for a point that carries none.
+func recordedRoutes(t *testing.T, reader sdkmetric.Reader) []string {
+	t.Helper()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+
+	var routes []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "http.server.request.duration" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("%s: want a float64 histogram, got %T", m.Name, m.Data)
+			}
+			for _, dp := range hist.DataPoints {
+				route, _ := dp.Attributes.Value(semconv.HTTPRouteKey)
+				routes = append(routes, route.AsString())
+			}
+		}
+	}
+	if len(routes) == 0 {
+		t.Fatal("no http.server.request.duration data points recorded at all")
+	}
+	return routes
+}
+
+// Tracing probes buries real traces; counting them skews the latency
+// percentiles and the error-ratio denominator.
+func TestProbesAreNotTraced(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+	h := newTestServer(t)
+
+	for _, path := range []string{"/healthz", "/readyz"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	if got := recorder.Ended(); len(got) != 0 {
+		t.Fatalf("probes must produce no spans, got %d", len(got))
+	}
+
+	// The filter must be scoped to probes, not disable tracing outright.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(recorder.Ended()) == 0 {
+		t.Fatal("a real request must still be traced")
 	}
 }
 

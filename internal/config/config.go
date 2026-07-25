@@ -3,10 +3,11 @@
 // convenience and production-safe defaults underneath.
 //
 // Variable names are unprefixed, sharing a namespace with everything else in
-// the environment. "service" and "tracing" are named defensively so they
-// don't collide with generic NAME/ENV or the OpenTelemetry SDK's own OTEL_*
-// vars; check any new key against what an orchestrator might already set
-// (Kubernetes injects <SERVICE>_PORT for every Service in the namespace).
+// the environment. "service" is named defensively so it does not collide with
+// generic NAME/ENV; "otel" deliberately does the opposite and adopts the
+// OpenTelemetry SDK's own spelling (see OTelConfig). Check any new key against
+// what an orchestrator might already set (Kubernetes injects <SERVICE>_PORT
+// for every Service in the namespace).
 //
 // .env.example is the single list of available settings, written exactly as
 // a deployment sets them — there is deliberately one vocabulary, not a
@@ -19,6 +20,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,7 +35,7 @@ type Config struct {
 	Postgres  PostgresConfig  `mapstructure:"postgres"`
 	Redis     RedisConfig     `mapstructure:"redis"`
 	Cache     CacheConfig     `mapstructure:"cache"`
-	Tracing   TracingConfig   `mapstructure:"tracing"`
+	OTel      OTelConfig      `mapstructure:"otel"`
 	Log       LogConfig       `mapstructure:"log"`
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 }
@@ -190,18 +192,96 @@ type CacheConfig struct {
 	DefaultTTL time.Duration `mapstructure:"default_ttl"`
 }
 
-// TracingConfig controls trace export: OTLP/gRPC endpoint and sampling.
+// OTelConfig controls OTLP export of traces and metrics.
 //
-// Named "tracing", not "otel", on purpose: the OpenTelemetry SDK reads its own
-// OTEL_* variables (OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT,
-// OTEL_SDK_DISABLED, ...). Defining our settings in that namespace would squat a
-// prefix another library actively consumes, so an operator setting the real
-// OTEL_EXPORTER_OTLP_ENDPOINT would be silently ignored.
-type TracingConfig struct {
-	Enabled     bool    `mapstructure:"enabled"`
-	Endpoint    string  `mapstructure:"endpoint"`
-	Insecure    bool    `mapstructure:"insecure"`
-	SampleRatio float64 `mapstructure:"sample_ratio"`
+// The keys spell out to the OpenTelemetry SDK's own variable names on purpose.
+// The SDK reads those names from the real environment itself, so matching its
+// spelling and meaning is what keeps an operator's OTEL_EXPORTER_OTLP_ENDPOINT
+// from being silently ignored. Two deliberate deviations:
+//   - OTEL_SERVICE_NAME is not read; SERVICE_NAME owns the identity because the
+//     logger uses it too.
+//   - OTEL_METRIC_EXPORT_INTERVAL is milliseconds, per spec, unlike every other
+//     interval here.
+//
+// Unregistered OTEL_* still reach the exporter from the real environment
+// (_HEADERS, _TIMEOUT, _COMPRESSION) — but not from .env, which is parsed into
+// Viper rather than exported into the process.
+type OTelConfig struct {
+	// SDKDisabled turns off both signals; one signal is disabled with
+	// TracesExporter/MetricsExporter = "none".
+	SDKDisabled bool `mapstructure:"sdk_disabled"`
+
+	// TracesExporter and MetricsExporter accept "otlp" or "none".
+	TracesExporter  string `mapstructure:"traces_exporter"`
+	MetricsExporter string `mapstructure:"metrics_exporter"`
+
+	// Endpoint is the collector base URL. Its scheme decides transport
+	// security, which is why there is no separate insecure flag.
+	Endpoint string `mapstructure:"exporter_otlp_endpoint"`
+	// TracesEndpoint and MetricsEndpoint override Endpoint for one signal.
+	TracesEndpoint  string `mapstructure:"exporter_otlp_traces_endpoint"`
+	MetricsEndpoint string `mapstructure:"exporter_otlp_metrics_endpoint"`
+
+	// TracesSampler is a spec sampler name; see telemetry.NewSampler.
+	TracesSampler string `mapstructure:"traces_sampler"`
+	// TracesSamplerArg is the ratio for the traceidratio samplers.
+	TracesSamplerArg float64 `mapstructure:"traces_sampler_arg"`
+
+	// MetricExportIntervalMillis is the push period, in milliseconds.
+	MetricExportIntervalMillis int `mapstructure:"metric_export_interval"`
+}
+
+// TracesEnabled reports whether spans should be exported.
+func (o OTelConfig) TracesEnabled() bool {
+	return !o.SDKDisabled && o.TracesExporter == OTelExporterOTLP
+}
+
+// MetricsEnabled reports whether metrics should be exported. There is no scrape
+// endpoint, so disabling this means no metrics at all.
+func (o OTelConfig) MetricsEnabled() bool {
+	return !o.SDKDisabled && o.MetricsExporter == OTelExporterOTLP
+}
+
+// TraceEndpoint resolves the per-signal override against the base endpoint.
+func (o OTelConfig) TraceEndpoint() string {
+	if o.TracesEndpoint != "" {
+		return o.TracesEndpoint
+	}
+	return o.Endpoint
+}
+
+// MetricEndpoint resolves the per-signal override against the base endpoint.
+func (o OTelConfig) MetricEndpoint() string {
+	if o.MetricsEndpoint != "" {
+		return o.MetricsEndpoint
+	}
+	return o.Endpoint
+}
+
+// MetricExportInterval converts the spec's millisecond integer to a Duration.
+func (o OTelConfig) MetricExportInterval() time.Duration {
+	return time.Duration(o.MetricExportIntervalMillis) * time.Millisecond
+}
+
+// Exporter values accepted in OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER.
+const (
+	// OTelExporterOTLP pushes over OTLP/gRPC.
+	OTelExporterOTLP = "otlp"
+	// OTelExporterNone disables the signal.
+	OTelExporterNone = "none"
+)
+
+// OTelSamplers are the OTEL_TRACES_SAMPLER values this app implements. The
+// spec's jaeger_remote and xray are rejected by validation rather than ignored:
+// a sampler that silently is not the one you asked for is how an incident ends
+// up with no trace to look at.
+var OTelSamplers = []string{
+	"always_on",
+	"always_off",
+	"traceidratio",
+	"parentbased_always_on",
+	"parentbased_always_off",
+	"parentbased_traceidratio",
 }
 
 // LogConfig sets slog level ("debug".."error") and format ("text" or "json").
@@ -363,13 +443,46 @@ func (c *Config) validate() error {
 		fail("cache.default_ttl must be > 0, got %s", c.Cache.DefaultTTL)
 	}
 
-	if c.Tracing.Enabled {
-		if c.Tracing.Endpoint == "" {
-			fail("tracing.endpoint must be set when tracing.enabled")
+	for _, e := range []struct {
+		key   string
+		value string
+	}{
+		{"otel.traces_exporter", c.OTel.TracesExporter},
+		{"otel.metrics_exporter", c.OTel.MetricsExporter},
+	} {
+		if e.value != OTelExporterOTLP && e.value != OTelExporterNone {
+			fail("%s must be %s or %s, got %q", e.key, OTelExporterOTLP, OTelExporterNone, e.value)
 		}
-		if c.Tracing.SampleRatio < 0 || c.Tracing.SampleRatio > 1 {
-			fail("tracing.sample_ratio must be in 0.0..1.0, got %v", c.Tracing.SampleRatio)
+	}
+	// Only validated per signal: a broken endpoint must not block boot for a
+	// deployment that exports neither.
+	for _, e := range []struct {
+		key      string
+		endpoint string
+		enabled  bool
+	}{
+		{"otel.exporter_otlp_traces_endpoint", c.OTel.TraceEndpoint(), c.OTel.TracesEnabled()},
+		{"otel.exporter_otlp_metrics_endpoint", c.OTel.MetricEndpoint(), c.OTel.MetricsEnabled()},
+	} {
+		if !e.enabled {
+			continue
 		}
+		if err := validateOTLPEndpoint(e.endpoint); err != nil {
+			fail("%s: %w", e.key, err)
+		}
+	}
+	if c.OTel.TracesEnabled() {
+		if !slices.Contains(OTelSamplers, c.OTel.TracesSampler) {
+			fail("otel.traces_sampler must be one of %s, got %q",
+				strings.Join(OTelSamplers, "|"), c.OTel.TracesSampler)
+		}
+		if c.OTel.TracesSamplerArg < 0 || c.OTel.TracesSamplerArg > 1 {
+			fail("otel.traces_sampler_arg must be in 0.0..1.0, got %v", c.OTel.TracesSamplerArg)
+		}
+	}
+	if c.OTel.MetricsEnabled() && c.OTel.MetricExportIntervalMillis <= 0 {
+		fail("otel.metric_export_interval must be > 0 milliseconds, got %d",
+			c.OTel.MetricExportIntervalMillis)
 	}
 
 	// Both are matched case-insensitively downstream; validate the same way so
@@ -395,6 +508,28 @@ func (c *Config) validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// validateOTLPEndpoint enforces the spec's URL form. The scheme selects TLS, so
+// a bare "host:4317" — what everyone types first — has no defined transport
+// security and is rejected with the fix spelled out.
+func validateOTLPEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return errors.New("must be set while the signal is exported")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("must be a URL, got %q", endpoint)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf(
+			"must include an http:// or https:// scheme, which selects transport security; got %q (try %q)",
+			endpoint, "http://"+endpoint)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("must include a host, got %q", endpoint)
+	}
+	return nil
 }
 
 // setDefaults registers every key with its production-safe value; Viper's
@@ -429,10 +564,18 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("cache.default_ttl", "5m")
 
-	v.SetDefault("tracing.enabled", true)
-	v.SetDefault("tracing.endpoint", "localhost:4317")
-	v.SetDefault("tracing.insecure", true)
-	v.SetDefault("tracing.sample_ratio", 1.0)
+	v.SetDefault("otel.sdk_disabled", false)
+	v.SetDefault("otel.traces_exporter", OTelExporterOTLP)
+	v.SetDefault("otel.metrics_exporter", OTelExporterOTLP)
+	v.SetDefault("otel.exporter_otlp_endpoint", "http://localhost:4317")
+	// Empty means "inherit the base endpoint"; registered anyway because
+	// AutomaticEnv only resolves keys Viper already knows.
+	v.SetDefault("otel.exporter_otlp_traces_endpoint", "")
+	v.SetDefault("otel.exporter_otlp_metrics_endpoint", "")
+	v.SetDefault("otel.traces_sampler", "parentbased_traceidratio")
+	v.SetDefault("otel.traces_sampler_arg", 1.0)
+	// Milliseconds, per spec — this is the OTel SDK's own default.
+	v.SetDefault("otel.metric_export_interval", 60000)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")

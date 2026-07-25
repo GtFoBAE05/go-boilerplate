@@ -13,7 +13,7 @@ enforced by a linter, not by convention).
 - **Type-safe SQL** — [sqlc](https://sqlc.dev) generates Go from raw SQL; no ORM, no reflection
 - **Versioned migrations** — [goose](https://github.com/pressly/goose) files embedded in the binary, applied at boot (or from CI in prod)
 - **Cache-aside Redis** — optional by config: disabled / degrade-gracefully / required
-- **Full observability** — OTel traces (handler → service → SQL/Redis), Prometheus metrics, trace-correlated `slog` logs
+- **Full observability** — OTel traces and metrics pushed over OTLP (handler → service → SQL/Redis), trace-correlated `slog` logs
 - **Hardened HTTP** — single response envelope, per-IP rate limiting, request timeouts, 1 MiB body cap, strict JSON validation (query params included)
 - **Loopback-only pprof** — profiling on its own private port, off by default, never on the public API
 - **Validated config** — every knob checked at boot, all errors reported at once, secrets redacted in logs
@@ -66,7 +66,8 @@ never collide with natively installed instances.
 | GET    | `/healthz`           | Liveness probe                           |
 | GET    | `/readyz`            | Readiness (pings postgres + redis)       |
 
-`/metrics` and pprof are **not** on this port — see [Observability](#observability).
+There is no `/metrics` on this port, or on any port — metrics are pushed to a
+collector. See [Observability](#observability).
 
 ```bash
 curl -X POST localhost:8080/api/v1/users -d '{"name":"alice","email":"alice@example.com"}'
@@ -85,7 +86,7 @@ curl localhost:8080/api/v1/users/1
 | Config        | [Viper](https://github.com/spf13/viper) — env vars + `.env` for dev, validated at boot |
 | Logging       | stdlib `log/slog`, JSON in prod, trace-ID correlated                   |
 | Tracing       | OpenTelemetry → OTLP/gRPC (Jaeger, Tempo, any collector)               |
-| Metrics       | OpenTelemetry → Prometheus exporter on `/metrics`                      |
+| Metrics       | OpenTelemetry → OTLP/gRPC push to a collector (no scrape endpoint)     |
 
 ## Layout
 
@@ -110,7 +111,7 @@ internal/
 db/
   migrations/         goose SQL migrations (embedded, applied at boot)
   queries/            sqlc query sources
-deploy/               Prometheus + OTel collector configs for the local stack
+deploy/               OTel collector, Prometheus, and alert rule configs
 ```
 
 `internal/platform/` is the one grouped directory, and it earns the nesting by
@@ -194,17 +195,20 @@ defaults (never via `os.Setenv`, which would make `Load` non-idempotent), so a
 real environment variable still wins for free.
 
 Names are **unprefixed**, which means they share a namespace with everything else
-in the environment. Two sections are named defensively as a result, and should
-stay that way:
+in the environment. Two sections are named deliberately as a result, in opposite
+directions, and should stay that way:
 
 - **`SERVICE_NAME` / `SERVICE_ENV`** rather than bare `NAME` / `ENV`, which are
   generic enough that unrelated tooling sets them.
-- **`TRACING_*`** rather than `OTEL_*`, because the OpenTelemetry SDK
-  autoconfigures from `OTEL_*` itself (`OTEL_SERVICE_NAME`,
-  `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SDK_DISABLED`). Defining our own
-  `OTEL_ENABLED` there would squat a namespace another library actively reads —
-  an operator setting the real `OTEL_EXPORTER_OTLP_ENDPOINT` would be silently
-  ignored.
+- **`OTEL_*`, using the OpenTelemetry SDK's own names with the SDK's own
+  meaning** — `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_SAMPLER`,
+  `OTEL_SDK_DISABLED`. Inventing a private spelling would mean an operator who
+  sets the real variable from memory is silently ignored. The price is owing the
+  spec's semantics: `OTEL_METRIC_EXPORT_INTERVAL` is **milliseconds**, not a Go
+  duration, and `OTEL_EXPORTER_OTLP_ENDPOINT` **requires a scheme** because that
+  is what selects TLS. Both are validated at boot. `OTEL_SERVICE_NAME` is the
+  one exception, documented in `.env.example`: `SERVICE_NAME` owns the service
+  identity because the logger uses it too.
 
 When adding a key, check the resulting name against what your platform injects.
 Kubernetes sets `<SERVICE>_PORT` and `<SERVICE>_SERVICE_HOST` for every Service in
@@ -246,24 +250,91 @@ prepared-statement cache breaks there.
 
 - **Traces**: Jaeger UI at <http://localhost:16686> — spans run
   handler → service → SQL/Redis, correlated with logs via `trace_id`.
-- **Metrics**: Prometheus at <http://localhost:9090>, scraping `:8080/metrics`.
+- **Metrics**: Prometheus at <http://localhost:9090>, scraping the collector at
+  `:8889` — the app pushes there over OTLP.
 - **Profiling**: pprof on a private loopback listener, off by default — set
   `PPROF_ENABLED=true`, then
   `go tool pprof http://localhost:6060/debug/pprof/profile`. While disabled
   nothing is created: no socket, no goroutine.
 
-These are on **two different listeners** because their exposure requirements are
-opposite:
+Both signals leave the process the same way — an OTLP/gRPC push to the
+collector, which fans traces out to Jaeger and re-exposes metrics for Prometheus
+to scrape. **The app serves no `/metrics`, on any port.** A test asserts it stays
+that way.
 
-| | where | why |
+That is the deliberate trade:
+
+| | pull (what this used to be) | push (what it is) |
 | --- | --- | --- |
-| `/metrics` | public port, outside the rate limiter | a scraper must reach it from off-host (in k8s, the pod IP) |
-| pprof | `127.0.0.1:PPROF_PORT`, off by default | dumps raw memory, lets any caller trigger expensive profiles |
+| exposure | unauthenticated endpoint on the public port, leaking route patterns and pool sizes | one outbound connection, nothing listening |
+| liveness | `up` for free — Prometheus knows a target it cannot reach | no `up`; absence of series is the only signal |
+| failure mode | collector dies, metrics keep accumulating locally | collector dies, metrics are gone |
 
-`/metrics` is unauthenticated and reveals route patterns, latency distributions
-and pool sizes — **block it at your ingress if the API is internet-facing.** pprof
-has no bind-host option on purpose: reach it with `kubectl port-forward`, never by
-widening the bind.
+Losing `up` is the part that costs something, and `deploy/rules.yml` handles it
+explicitly rather than pretending otherwise: `AppMetricsMissing` fires on
+`absent(go_goroutine_count)`, and `CollectorDown` — the collector *is* still
+scraped — is what distinguishes a dead app from a dead pipeline. In Kubernetes,
+restarting a wedged process is the liveness probe's job anyway, not an alert's.
+
+pprof remains on its own private listener, off by default, `127.0.0.1` only. It
+has no bind-host option on purpose: reach it with `kubectl port-forward`, never
+by widening the bind.
+
+### What gets exported
+
+Nothing here is hand-rolled — every series comes from an instrumentation library
+wired in `internal/platform`, so a new resource inherits all of it for free.
+Names below are after the collector's OTLP-to-Prometheus translation.
+
+| Series | From | Answers |
+| --- | --- | --- |
+| `http_server_request_duration_seconds{http_route,...}` | otelhttp | rate, errors, latency (RED) |
+| `pgxpool_acquired_connections`, `pgxpool_max_connections`, `pgxpool_empty_acquire_total`, ... | `otelpgx.RecordStats` | pool saturation |
+| `db_client_connections_usage{db_system="redis"}`, ... | `redisotel.InstrumentMetrics` | Redis client pool |
+| `go_goroutine_count`, `go_memory_used_bytes`, ... | `contrib/instrumentation/runtime` | goroutines, heap, GC |
+| `target_info{service_version,vcs_ref_head_revision}` | OTel resource, stamped from `-ldflags` | which build a series came from |
+
+Runtime metrics are started explicitly in `telemetry.Setup`. Under a scrape
+endpoint the Prometheus client library contributes its Go collector by default;
+pushing over OTLP nothing does, and goroutine count and heap size would simply
+not exist.
+
+Pool saturation is the one worth internalising: an exhausted pool never surfaces
+as an error, only as latency *inside* the acquire, so `http_*` alone cannot tell
+"the database is slow" from "we ran out of connections to it".
+
+Two labels are load-bearing and neither is free under push:
+
+- **`http_route`** — otelhttp wraps the router from the outside and never sees
+  chi's pattern. The `routePattern` middleware feeds it back through otelhttp's
+  Labeler after routing; without it every endpoint shares one histogram.
+  Unmatched paths are left unlabelled on purpose, so a scanner walking random
+  URLs cannot mint a series per path.
+- **`instance`** — scraping derived it from the target address. Pushing, only
+  the process can say who it is, so `telemetry.Setup` stamps
+  `service.instance.id` from the hostname. Without it every replica collapses
+  onto one series and per-pod problems average away. `prometheus.yml` needs
+  `honor_labels: true` or the scrape overwrites it with the collector's identity.
+
+`target_info` is what turns a regression into a deploy. Join it in PromQL:
+
+```promql
+job:http_request_duration_seconds:p99_5m
+  * on(instance) group_left(service_version) target_info
+```
+
+`deploy/rules.yml` ships the recording and alerting rules for exactly these
+series — error ratio, p99, pool utilisation, liveness, plus a
+`PostgresPoolStarved` leading indicator. Prometheus loads it from the compose
+stack. Recording rules exist so a dashboard panel and its alert evaluate the
+*same* expression; validate edits with
+`promtool check rules deploy/rules.yml`.
+
+**Adding a metric of your own:** build the instrument once in the service
+constructor (never per request), keep the attribute set bounded — an id, email
+or `trace_id` as a label is one time series per value and will take down the
+collector — and first check the metric is not already derivable from
+`http_server_*`, which sees every request the API answers.
 
 ### Shutdown
 

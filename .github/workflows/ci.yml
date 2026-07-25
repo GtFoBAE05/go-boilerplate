@@ -108,7 +108,7 @@ jobs:
         run: |
           output=$(docker run --rm \
             -e POSTGRES_DSN="postgres://app:app@127.0.0.1:59999/app?sslmode=disable" \
-            -e TRACING_ENABLED=false \
+            -e OTEL_SDK_DISABLED=true \
             -e REDIS_MODE=disabled \
             go-boilerplate:ci 2>&1 || true)
           echo "$output"

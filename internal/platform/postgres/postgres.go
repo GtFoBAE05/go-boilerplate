@@ -81,5 +81,12 @@ func NewPool(ctx context.Context, dsn string, opts ...Option) (*pgxpool.Pool, er
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
+
+	// Pool saturation never surfaces as an error, only as latency inside the
+	// acquire. Reads the global meter provider, so telemetry must be set up first.
+	if err := otelpgx.RecordStats(pool); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("record postgres pool stats: %w", err)
+	}
 	return pool, nil
 }

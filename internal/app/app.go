@@ -44,16 +44,31 @@ func Run(cfg *config.Config) error {
 	log.Info("starting", "service", cfg.Service.Name, "build", buildInfo())
 
 	// Unpacked here so the platform packages below take plain values, not *config.Config.
-	var otelOpts []telemetry.Option
-	if cfg.Tracing.Enabled {
-		otelOpts = append(otelOpts, telemetry.WithTracing(
-			cfg.Tracing.Endpoint, cfg.Tracing.Insecure, cfg.Tracing.SampleRatio,
+	otelOpts := []telemetry.Option{telemetry.WithBuild(version, commit)}
+	if cfg.OTel.TracesEnabled() {
+		sampler, err := telemetry.NewSampler(cfg.OTel.TracesSampler, cfg.OTel.TracesSamplerArg)
+		if err != nil {
+			// Unreachable via Load, which validates the name.
+			return fmt.Errorf("configure trace sampler: %w", err)
+		}
+		otelOpts = append(otelOpts, telemetry.WithTracing(cfg.OTel.TraceEndpoint(), sampler))
+	}
+	if cfg.OTel.MetricsEnabled() {
+		otelOpts = append(otelOpts, telemetry.WithMetrics(
+			cfg.OTel.MetricEndpoint(), cfg.OTel.MetricExportInterval(),
 		))
 	}
 	shutdownOtel, err := telemetry.Setup(ctx, cfg.Service.Name, cfg.Service.Env, otelOpts...)
 	if err != nil {
 		return fmt.Errorf("setup telemetry: %w", err)
 	}
+	// A wrong endpoint is invisible at runtime except as missing data: nothing
+	// is scrapeable from this process.
+	log.Info("telemetry configured",
+		"traces", exportTarget(cfg.OTel.TracesEnabled(), cfg.OTel.TraceEndpoint()),
+		"metrics", exportTarget(cfg.OTel.MetricsEnabled(), cfg.OTel.MetricEndpoint()),
+		"metric_export_interval", cfg.OTel.MetricExportInterval(),
+	)
 	defer func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), otelFlushTimeout)
 		defer cancel()
@@ -152,6 +167,13 @@ func Run(cfg *config.Config) error {
 	}
 	log.Info("shutdown complete")
 	return nil
+}
+
+func exportTarget(enabled bool, endpoint string) string {
+	if !enabled {
+		return "disabled"
+	}
+	return endpoint
 }
 
 func shutdownCause(signalled bool) string {

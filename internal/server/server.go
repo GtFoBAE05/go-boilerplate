@@ -17,7 +17,6 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	goredis "github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -71,7 +70,7 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	// unconditionally, letting any client spoof its address (and evade the
 	// rate limiter). Deployments behind a trusted proxy should add their own
 	// middleware that only honors forwarded headers from that proxy.
-	r.Use(spanRoutePattern)
+	r.Use(routePattern)
 	r.Use(requestLogger(log))
 	r.Use(recoverPanics(log))
 	// Per-request deadline: downstream ctx-aware calls (pgx, redis) abort
@@ -99,11 +98,9 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	healthHandler := health.NewHandler(required, optional)
 	r.Get("/healthz", healthHandler.Liveness)
 	r.Get("/readyz", healthHandler.Readiness)
-	// Registered outside the /api/v1 subtree so it is never rate-limited: a
-	// throttled scrape shows up as a monitoring gap during an incident. It's
-	// unauthenticated and reveals route patterns and pool sizes, so block
-	// /metrics at your ingress if the API is internet-facing.
-	r.Handle("/metrics", promhttp.Handler())
+	// No /metrics on purpose: metrics are pushed over OTLP (see
+	// platform/telemetry). A scrape endpoint would put route patterns, latency
+	// distributions and pool sizes on an unauthenticated public port.
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Rate limit only the API subtree so health probes — hit constantly by
@@ -126,8 +123,12 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	})
 
 	// otelhttp wraps the whole router: creates the server span, extracts
-	// incoming trace context, and records HTTP metrics.
-	root := otelhttp.NewHandler(r, "http.server")
+	// incoming trace context, and records HTTP metrics. The filter drops probes
+	// from both signals — always-fast probe traffic in the same histogram drags
+	// the p99 down and dilutes the error-ratio denominator.
+	root := otelhttp.NewHandler(r, "http.server",
+		otelhttp.WithFilter(func(r *http.Request) bool { return !isProbe(r.URL.Path) }),
+	)
 
 	return &Server{
 		http: &http.Server{

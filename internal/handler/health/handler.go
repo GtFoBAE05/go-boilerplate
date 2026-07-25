@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go-boilerplate/internal/handler"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Pinger is satisfied by *pgxpool.Pool; other dependencies adapt to it in
@@ -50,6 +52,19 @@ func (h *Handler) Liveness(w http.ResponseWriter, _ *http.Request) {
 	handler.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// probeParent stops the ping spans that otelpgx and redisotel create with no
+// opt-out: under the parentbased_* samplers, a child of an unsampled parent is
+// dropped. Must be valid, or ParentBased falls back to the root sampler. IDs
+// are arbitrary; nothing is exported under them.
+var probeParent = trace.NewSpanContext(trace.SpanContextConfig{
+	TraceID: trace.TraceID{0x70, 0x72, 0x6f, 0x62, 0x65, 1},
+	SpanID:  trace.SpanID{0x70, 0x72, 0x6f, 0x62, 0x65, 1},
+})
+
+func unsampled(ctx context.Context) context.Context {
+	return trace.ContextWithSpanContext(ctx, probeParent)
+}
+
 // Readiness returns 503 while draining, or when a required dependency fails
 // its ping.
 func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +75,7 @@ func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(unsampled(r.Context()), 3*time.Second)
 	defer cancel()
 
 	status := http.StatusOK

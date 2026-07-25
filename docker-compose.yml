@@ -36,6 +36,7 @@ services:
     ports:
       - "4317:4317" # OTLP gRPC (app → collector)
       - "4318:4318" # OTLP HTTP
+      - "8889:8889" # Prometheus scrape target (collector → prometheus)
     depends_on:
       - jaeger
 
@@ -53,8 +54,9 @@ services:
       - "9090:9090" # UI: http://localhost:9090
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ./deploy/rules.yml:/etc/prometheus/rules.yml:ro
+    depends_on:
+      - otel-collector
 
 volumes:
   pgdata:
