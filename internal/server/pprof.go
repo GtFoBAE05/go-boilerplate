@@ -12,18 +12,10 @@ import (
 // returns nil when disabled — in which case no socket is opened and the caller
 // starts no goroutine for it.
 //
-// Being off is an attack-surface decision, not a performance one: pprof samples
-// nothing until an endpoint is requested, so an idle listener costs one blocked
-// goroutine and a socket.
-//
-// pprof gets its own listener rather than a path on the public router because
-// it exposes raw memory contents and lets any caller trigger an expensive
-// profile. /metrics, by contrast, stays on the public router: a scraper has to
-// reach it from off-host, so the two cannot share a listener without a bind-host
-// knob that is guaranteed to be wrong for one of them.
-//
-// The bind address is hardcoded to loopback for that reason — reach it with
-// `kubectl port-forward` or over SSH, never by widening the bind.
+// It gets its own loopback-only listener rather than a path on the public
+// router: pprof exposes raw memory and lets any caller trigger an expensive
+// profile, unlike /metrics which a scraper must reach from off-host. Reach it
+// with `kubectl port-forward` or over SSH, never by widening the bind.
 //
 // Handlers are mounted on a fresh ServeMux, not http.DefaultServeMux: importing
 // net/http/pprof registers them on the default mux, and reusing it would expose
@@ -40,7 +32,6 @@ func NewPprofServer(enabled bool, port int, log *slog.Logger) *http.Server {
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-	// Bind 127.0.0.1 explicitly (not ":") so the socket is host-private.
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Info("pprof listening", "addr", addr)
 	return &http.Server{

@@ -100,13 +100,9 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	r.Get("/healthz", healthHandler.Liveness)
 	r.Get("/readyz", healthHandler.Readiness)
 	// Registered outside the /api/v1 subtree so it is never rate-limited: a
-	// throttled scrape shows up as a monitoring gap during an incident.
-	//
-	// This is on the public port because a scraper has to reach it from
-	// off-host (in Kubernetes, Prometheus hits the pod IP). It is unauthenticated
-	// and reveals route patterns, latency distributions and pool sizes, so block
-	// /metrics at your ingress if the API is internet-facing. pprof, which is
-	// far more sensitive, is on a separate loopback listener instead.
+	// throttled scrape shows up as a monitoring gap during an incident. It's
+	// unauthenticated and reveals route patterns and pool sizes, so block
+	// /metrics at your ingress if the API is internet-facing.
 	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/api/v1", func(r chi.Router) {

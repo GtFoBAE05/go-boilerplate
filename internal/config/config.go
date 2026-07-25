@@ -2,19 +2,15 @@
 // variables (e.g. SERVER_PORT=9090), with a local .env file as a development
 // convenience and production-safe defaults underneath.
 //
-// Variable names are unprefixed, which puts them in a namespace shared with
-// every other tool in the environment. Two sections are named defensively as a
-// result: "service" (so the generic NAME and ENV become SERVICE_NAME and
-// SERVICE_ENV) and "tracing" (so we do not squat OTEL_*, which the OpenTelemetry
-// SDK reads itself). Check any new key against what an orchestrator or sidecar
-// might already set - Kubernetes injects <SERVICE>_PORT and <SERVICE>_SERVICE_HOST
-// for every Service in the namespace, so a key spelling out to POSTGRES_PORT or
-// REDIS_PORT would be silently overwritten.
+// Variable names are unprefixed, sharing a namespace with everything else in
+// the environment. "service" and "tracing" are named defensively so they
+// don't collide with generic NAME/ENV or the OpenTelemetry SDK's own OTEL_*
+// vars; check any new key against what an orchestrator might already set
+// (Kubernetes injects <SERVICE>_PORT for every Service in the namespace).
 //
-// There is deliberately one vocabulary. An earlier revision kept a config.yaml
-// of dotted keys that production never read, so every knob had two spellings
-// and the env names were documented nowhere. .env.example is now the single
-// list of available settings, written exactly as a deployment sets them.
+// .env.example is the single list of available settings, written exactly as
+// a deployment sets them — there is deliberately one vocabulary, not a
+// config.yaml shadowing the env vars.
 package config
 
 import (
@@ -292,8 +288,6 @@ func (c *Config) validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		fail("server.port must be in 1..65535, got %d", c.Server.Port)
 	}
-	// Only checked when enabled, mirroring tracing.endpoint: a disabled subsystem's
-	// settings are inert and must not block boot.
 	if c.Pprof.Enabled {
 		if c.Pprof.Port < 1 || c.Pprof.Port > 65535 {
 			fail("pprof.port must be in 1..65535 when pprof.enabled, got %d", c.Pprof.Port)
@@ -403,13 +397,9 @@ func (c *Config) validate() error {
 	return errors.Join(errs...)
 }
 
-// setDefaults registers every key. Registration is mandatory, not just a
-// convenience: Viper's AutomaticEnv only resolves keys it already knows, so an
-// unregistered key would be invisible even when its variable is set.
-//
-// These values are the production-safe set, because a deployment ships no file
-// and runs on exactly this. .env.example opts local development into the
-// convenient ones (debug logging, migrate-on-boot).
+// setDefaults registers every key with its production-safe value; Viper's
+// AutomaticEnv only resolves keys it already knows, so an unregistered key
+// would be invisible even when its variable is set.
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("service.name", "go-boilerplate")
 	v.SetDefault("service.env", EnvDevelopment)
@@ -429,8 +419,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("postgres.max_conns", 25)
 	v.SetDefault("postgres.min_conns", 2)
 	v.SetDefault("postgres.max_conn_lifetime", "1h")
-	// Defaults are the safe production set, since an image ships without
-	// file at all; .env.example opts local development into the convenient ones.
 	v.SetDefault("postgres.migrate", false)
 	v.SetDefault("postgres.query_exec_mode", "cache_statement")
 

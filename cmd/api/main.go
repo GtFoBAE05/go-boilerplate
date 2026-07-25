@@ -11,10 +11,7 @@ import (
 )
 
 func main() {
-	// Config is loaded here, before the app exists, so app.Run takes a ready
-	// *config.Config instead of reaching for the environment itself. That keeps
-	// Run callable from a test or an alternate binary with a config built in
-	// code — no file, no environment.
+	// Loaded here, not inside Run, so Run stays callable with a config built in code.
 	cfg, err := config.Load()
 	if err != nil {
 		// The real logger is built from cfg, so this failure has to report

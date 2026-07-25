@@ -43,9 +43,7 @@ func Run(cfg *config.Config) error {
 	slog.SetDefault(log)
 	log.Info("starting", "service", cfg.Service.Name, "build", buildInfo())
 
-	// Config is unpacked here, at the single composition root: the platform
-	// packages below take plain values, so they stay usable from tests and
-	// tools that never load a config.Config.
+	// Unpacked here so the platform packages below take plain values, not *config.Config.
 	var otelOpts []telemetry.Option
 	if cfg.Tracing.Enabled {
 		otelOpts = append(otelOpts, telemetry.WithTracing(
@@ -109,7 +107,6 @@ func Run(cfg *config.Config) error {
 		})
 	}
 
-	// Block until a signal arrives or a listener dies.
 	<-runCtx.Done()
 
 	// Distinguish the two: only a signal means this instance is being taken out

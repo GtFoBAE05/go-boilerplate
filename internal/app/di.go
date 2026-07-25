@@ -13,10 +13,8 @@ import (
 	usersvc "go-boilerplate/internal/service/user"
 )
 
-// buildDeps wires repositories → services into server dependencies.
-// This is the file that grows with the app: adding a resource means adding
-// its construction here and a field in server.Deps — nothing in app.go
-// or cmd/ changes.
+// buildDeps wires repositories → services into server dependencies. Adding a
+// resource means adding its construction here and a field in server.Deps.
 func buildDeps(pool *pgxpool.Pool, rdb *goredis.Client, redisRequired bool, svcCache cache.Cache, log *slog.Logger) server.Deps {
 	repo := repository.NewStore(pool)
 
