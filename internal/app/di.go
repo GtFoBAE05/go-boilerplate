@@ -3,7 +3,7 @@ package app
 import (
 	"log/slog"
 
-	"go-boilerplate/internal/cache"
+	"go-boilerplate/internal/platform/cache"
 	"go-boilerplate/internal/repository"
 	"go-boilerplate/internal/server"
 

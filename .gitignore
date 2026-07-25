@@ -4,5 +4,6 @@ bin/
 *.out
 coverage.*
 .env
+!.env.example
 .idea/
 .vscode/

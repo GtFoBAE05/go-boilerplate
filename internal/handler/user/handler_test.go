@@ -190,6 +190,75 @@ func TestUpdatePartialBody(t *testing.T) {
 	}
 }
 
+// Deleting a row that never existed is a client mistake worth reporting, not a
+// silent 204.
+func TestDeleteNotFoundMapsTo404(t *testing.T) {
+	svc := &mockUserService{
+		del: func(context.Context, int64) error { return service.ErrNotFound },
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequest(http.MethodDelete, "/42", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteSuccessReturns204(t *testing.T) {
+	svc := &mockUserService{
+		del: func(context.Context, int64) error { return nil },
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequest(http.MethodDelete, "/42", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// A malformed ?limit must fail rather than silently serve the default page, and
+// the service must never be reached — a nil service panics if it is.
+func TestListRejectsBadPagination(t *testing.T) {
+	h := NewHandler(nil, slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequest(http.MethodGet, "/?limit=abc", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// A valid page must reach the service unchanged.
+func TestListPassesPaginationThrough(t *testing.T) {
+	var gotLimit, gotOffset int32
+	svc := &mockUserService{
+		list: func(_ context.Context, limit, offset int32) ([]usersvc.User, error) {
+			gotLimit, gotOffset = limit, offset
+			return nil, nil
+		},
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequest(http.MethodGet, "/?limit=7&offset=14", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if gotLimit != 7 || gotOffset != 14 {
+		t.Fatalf("want limit=7 offset=14 at the service, got %d/%d", gotLimit, gotOffset)
+	}
+}
+
 func TestUpdateEmptyBodyRejected(t *testing.T) {
 	// No service call expected: a nil service panics if the handler slips through.
 	h := NewHandler(nil, slog.New(slog.DiscardHandler))

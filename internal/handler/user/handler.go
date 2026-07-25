@@ -81,25 +81,22 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 	r = r.WithContext(ctx)
 
-	limit := queryInt32(r, "limit", 20)
-	offset := queryInt32(r, "offset", 0)
-	if limit < 1 || limit > 100 {
-		limit = 20
-	}
-	if offset < 0 {
-		offset = 0
+	page, ok := handler.DecodePage(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "invalid pagination")
+		return
 	}
 	span.SetAttributes(
-		attribute.Int("query.limit", int(limit)),
-		attribute.Int("query.offset", int(offset)),
+		attribute.Int("query.limit", int(page.Limit)),
+		attribute.Int("query.offset", int(page.Offset)),
 	)
 
-	users, err := h.svc.List(ctx, limit, offset)
+	users, err := h.svc.List(ctx, page.Limit, page.Offset)
 	if err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
 	}
-	handler.OKList(w, toListItemResponses(users), handler.Meta{Limit: limit, Offset: offset})
+	handler.OKList(w, toListItemResponses(users), page.Meta())
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
@@ -167,16 +164,4 @@ func trim(s *string) {
 
 func pathID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-}
-
-func queryInt32(r *http.Request, key string, def int32) int32 {
-	raw := r.URL.Query().Get(key)
-	if raw == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(raw, 10, 32)
-	if err != nil {
-		return def
-	}
-	return int32(n)
 }

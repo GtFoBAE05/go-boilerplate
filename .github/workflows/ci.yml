@@ -5,6 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep these in sync with the versions pinned in the Makefile.
+  SQLC_VERSION: "1.30.0"
+  VULN_VERSION: "v1.1.4"
+  GOLANGCI_VERSION: "v2.12.2"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -17,8 +31,10 @@ jobs:
         with:
           # Pinned to the version developers run locally, so CI and local
           # results never drift. Bump both together.
-          version: v2.12.2
+          version: ${{ env.GOLANGCI_VERSION }}
 
+  # Proves the documented invariant that `go test ./...` needs no Docker: this
+  # job has no services and must stay that way.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -26,17 +42,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - run: go build ./...
       - run: go test -race ./...
 
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - run: go build ./...
-
+  # Supersets the unit run: the integration tag adds testcontainers-backed
+  # tests on top of everything above.
   integration:
     runs-on: ubuntu-latest
     steps:
@@ -53,7 +63,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      # Pinned, not @latest: an unpinned scanner turns an unrelated upstream
+      # release into a red build on a branch that changed nothing.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@${{ env.VULN_VERSION }} ./...
 
   sqlc-diff:
     runs-on: ubuntu-latest
@@ -61,5 +73,45 @@ jobs:
       - uses: actions/checkout@v7
       - uses: sqlc-dev/setup-sqlc@v5
         with:
-          sqlc-version: "1.30.0"
+          sqlc-version: ${{ env.SQLC_VERSION }}
       - run: sqlc diff || (echo "sqlc-generated code is stale; run 'make sqlc'" && exit 1)
+
+  # .env.example and internal/config drift apart silently otherwise: nothing
+  # else in CI loads it, and a developer copying it to .env finds out first.
+  config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -run 'TestShippedExampleEnvIsValid|TestExampleEnvHasNoUnknownKeys' ./internal/config/...
+
+  # Builds the real production image so a broken Dockerfile fails here rather
+  # than at release time. Plain `docker build` on purpose: BuildKit is already
+  # the default on GitHub runners, so this needs no third-party action to keep
+  # pinned and working.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          docker build \
+            --build-arg VERSION="${{ github.ref_name }}" \
+            --build-arg COMMIT="${{ github.sha }}" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t go-boilerplate:ci .
+      # Proves the entrypoint is runnable and that config validation passes on
+      # the built-in defaults — a bad COPY or a stray dependency on
+      # the build stage would otherwise only surface on first deploy.
+      - name: Smoke test the image
+        run: |
+          output=$(docker run --rm \
+            -e POSTGRES_DSN="postgres://app:app@127.0.0.1:59999/app?sslmode=disable" \
+            -e TRACING_ENABLED=false \
+            -e REDIS_MODE=disabled \
+            go-boilerplate:ci 2>&1 || true)
+          echo "$output"
+          # Reaching the Postgres dial means config loaded and the app booted.
+          echo "$output" | grep -q "connect postgres" \
+            || (echo "::error::image did not reach the postgres connect step" && exit 1)

@@ -5,6 +5,7 @@ linters:
   enable:
     - bodyclose
     - copyloopvar
+    - depguard
     - gocritic
     - misspell
     - nolintlint
@@ -12,6 +13,36 @@ linters:
     - unconvert
     - unparam
     - whitespace
+  settings:
+    depguard:
+      rules:
+        # internal/platform holds generic infrastructure adapters. They take
+        # plain values plus functional options and know nothing about this
+        # application, which is what keeps them constructible from a test or a
+        # one-off tool with no config.Config. Grouping them under one directory
+        # is only safe while that rule is enforced — otherwise "platform"
+        # becomes the dumping ground every such directory turns into.
+        platform-stays-generic:
+          files:
+            - "**/internal/platform/**"
+          deny:
+            - pkg: go-boilerplate/internal
+              desc: >-
+                internal/platform must not import application packages. If an
+                adapter needs app knowledge, the decision belongs in app/ and
+                should be passed in as a plain value.
+        # Only the composition root reads configuration; everything downstream
+        # receives the decisions already made.
+        config-is-for-composition:
+          files:
+            - "**/internal/handler/**"
+            - "**/internal/service/**"
+            - "**/internal/repository/**"
+          deny:
+            - pkg: go-boilerplate/internal/config
+              desc: >-
+                only app/ and server/ may import config; take plain values or a
+                narrow interface instead.
   exclusions:
     generated: lax
     paths:

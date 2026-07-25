@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"time"
 
 	"go-boilerplate/internal/config"
 	"go-boilerplate/internal/handler"
@@ -27,8 +26,9 @@ import (
 
 // Server wraps the http.Server with the assembled router and logger.
 type Server struct {
-	http *http.Server
-	log  *slog.Logger
+	http   *http.Server
+	log    *slog.Logger
+	health *health.Handler
 }
 
 // keyByRemoteIP buckets rate-limit counters by r.RemoteAddr, the unspoofable
@@ -99,19 +99,27 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	healthHandler := health.NewHandler(required, optional)
 	r.Get("/healthz", healthHandler.Liveness)
 	r.Get("/readyz", healthHandler.Readiness)
+	// Registered outside the /api/v1 subtree so it is never rate-limited: a
+	// throttled scrape shows up as a monitoring gap during an incident.
+	//
+	// This is on the public port because a scraper has to reach it from
+	// off-host (in Kubernetes, Prometheus hits the pod IP). It is unauthenticated
+	// and reveals route patterns, latency distributions and pool sizes, so block
+	// /metrics at your ingress if the API is internet-facing. pprof, which is
+	// far more sensitive, is on a separate loopback listener instead.
 	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Rate limit only the API subtree so health probes and /metrics — used
-		// by orchestrators and Prometheus — are never throttled. Burst is the
-		// per-IP request count allowed in each 1s window; over it returns 429
-		// through the standard envelope.
+		// Rate limit only the API subtree so health probes — hit constantly by
+		// orchestrators — are never throttled. Requests is the per-IP count
+		// allowed in each window; over it returns 429 through the standard
+		// envelope.
 		if cfg.RateLimit.Enabled {
 			// Not httprate's KeyByRealIP: it trusts forwarded headers
 			// (GHSA-9g5q-2w5x-hmxf).
 			r.Use(httprate.LimitBy(
-				cfg.RateLimit.Burst,
-				time.Second,
+				cfg.RateLimit.Requests,
+				cfg.RateLimit.Window,
 				keyByRemoteIP,
 				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
 					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
@@ -133,9 +141,14 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 			WriteTimeout: cfg.Server.WriteTimeout,
 			IdleTimeout:  cfg.Server.IdleTimeout,
 		},
-		log: log,
+		log:    log,
+		health: healthHandler,
 	}
 }
+
+// BeginDrain flips /readyz to 503 while continuing to serve traffic, so an
+// orchestrator can remove this instance from rotation before Shutdown starts.
+func (s *Server) BeginDrain() { s.health.BeginDrain() }
 
 // Start blocks until the listener fails or Shutdown is called.
 func (s *Server) Start() error {

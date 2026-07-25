@@ -1,6 +1,4 @@
-// Package logger builds the application's slog.Logger from a level and
-// options, with trace_id/span_id attached automatically inside traced requests.
-package logger
+package telemetry
 
 import (
 	"context"
@@ -11,32 +9,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Option tunes the logger. Unset options mean JSON output and no env
-// attribute, so New(level) alone yields a usable production logger.
-type Option func(*options)
+// LogOption tunes the logger. Unset options mean JSON output and no env
+// attribute, so NewLogger(level) alone yields a usable production logger.
+type LogOption func(*logOptions)
 
-type options struct {
+type logOptions struct {
 	format string
 	env    string
 }
 
 // Format selects the handler: "text" for local development, anything else
 // (conventionally "json") for structured output.
-func Format(f string) Option {
-	return func(o *options) { o.format = f }
+func Format(f string) LogOption {
+	return func(o *logOptions) { o.format = f }
 }
 
 // Env stamps every record with an "env" attribute identifying the deployment.
-func Env(e string) Option {
-	return func(o *options) { o.env = e }
+func Env(e string) LogOption {
+	return func(o *logOptions) { o.env = e }
 }
 
-// New builds a slog.Logger at the given level ("debug", "info", "warn",
+// NewLogger builds a slog.Logger at the given level ("debug", "info", "warn",
 // "error"; anything else means info). Every record logged with a *Context
 // method gets trace_id/span_id attached automatically when the context
 // carries an active span.
-func New(level string, opts ...Option) *slog.Logger {
-	var o options
+func NewLogger(level string, opts ...LogOption) *slog.Logger {
+	var o logOptions
 	for _, opt := range opts {
 		opt(&o)
 	}

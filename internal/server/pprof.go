@@ -5,18 +5,31 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
+	"time"
 )
 
-// NewPprofServer builds a private pprof server bound to localhost:<port>, or
-// returns nil when port is 0. It is a separate listener from the public API so
-// profiling endpoints are never reachable from outside the host — pprof leaks
-// memory contents and lets a caller trigger expensive profiles.
+// NewPprofServer builds a private pprof server bound to 127.0.0.1:<port>, or
+// returns nil when disabled — in which case no socket is opened and the caller
+// starts no goroutine for it.
+//
+// Being off is an attack-surface decision, not a performance one: pprof samples
+// nothing until an endpoint is requested, so an idle listener costs one blocked
+// goroutine and a socket.
+//
+// pprof gets its own listener rather than a path on the public router because
+// it exposes raw memory contents and lets any caller trigger an expensive
+// profile. /metrics, by contrast, stays on the public router: a scraper has to
+// reach it from off-host, so the two cannot share a listener without a bind-host
+// knob that is guaranteed to be wrong for one of them.
+//
+// The bind address is hardcoded to loopback for that reason — reach it with
+// `kubectl port-forward` or over SSH, never by widening the bind.
 //
 // Handlers are mounted on a fresh ServeMux, not http.DefaultServeMux: importing
 // net/http/pprof registers them on the default mux, and reusing it would expose
 // pprof anywhere DefaultServeMux is served.
-func NewPprofServer(port int, log *slog.Logger) *http.Server {
-	if port <= 0 {
+func NewPprofServer(enabled bool, port int, log *slog.Logger) *http.Server {
+	if !enabled {
 		return nil
 	}
 
@@ -30,5 +43,12 @@ func NewPprofServer(port int, log *slog.Logger) *http.Server {
 	// Bind 127.0.0.1 explicitly (not ":") so the socket is host-private.
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Info("pprof listening", "addr", addr)
-	return &http.Server{Addr: addr, Handler: mux}
+	return &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// profile and trace stream for their full duration (30s by default), so
+		// no write timeout is set. Header reads stay bounded to keep a stuck
+		// client from pinning a goroutine.
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }

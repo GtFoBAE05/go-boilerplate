@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/exaring/otelpgx"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,6 +28,32 @@ func MinConns(n int32) Option {
 // MaxConnLifetime retires a connection after d, regardless of health.
 func MaxConnLifetime(d time.Duration) Option {
 	return func(c *pgxpool.Config) { c.MaxConnLifetime = d }
+}
+
+// QueryExecMode selects pgx's statement protocol by name, as accepted in
+// config: cache_statement (pgx's default), cache_describe, describe_exec, exec,
+// simple_protocol. An unknown name is ignored, leaving pgx's default — config
+// validation is what rejects typos.
+//
+// This exists because server-side prepared statements, which cache_statement
+// relies on, break behind a connection pooler running in transaction mode
+// (pgbouncer, RDS Proxy). Such deployments need exec or simple_protocol.
+func QueryExecMode(mode string) Option {
+	return func(c *pgxpool.Config) {
+		m, ok := queryExecModes[mode]
+		if !ok {
+			return
+		}
+		c.ConnConfig.DefaultQueryExecMode = m
+	}
+}
+
+var queryExecModes = map[string]pgx.QueryExecMode{
+	"cache_statement": pgx.QueryExecModeCacheStatement,
+	"cache_describe":  pgx.QueryExecModeCacheDescribe,
+	"describe_exec":   pgx.QueryExecModeDescribeExec,
+	"exec":            pgx.QueryExecModeExec,
+	"simple_protocol": pgx.QueryExecModeSimpleProtocol,
 }
 
 // NewPool creates a pgx connection pool and verifies connectivity.
