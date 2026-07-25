@@ -4,6 +4,7 @@ package health
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"go-boilerplate/internal/handler"
@@ -22,6 +23,9 @@ type Handler struct {
 	// optional dependencies are reported but never fail readiness —
 	// the app can serve traffic without them (e.g. cache).
 	optional map[string]Pinger
+	// draining makes readiness fail while the process is shutting down.
+	// Read on every probe and written once from the shutdown path, hence atomic.
+	draining atomic.Bool
 }
 
 // NewHandler builds the probe handler from required and optional
@@ -30,13 +34,32 @@ func NewHandler(required, optional map[string]Pinger) *Handler {
 	return &Handler{required: required, optional: optional}
 }
 
-// Liveness always returns 200: the process is up.
+// BeginDrain makes /readyz fail from now on, without touching liveness.
+//
+// It is called before shutdown starts so an orchestrator can take this
+// instance out of rotation while it is still able to finish in-flight work.
+// Endpoint removal is asynchronous in Kubernetes: shutting down the moment
+// SIGTERM lands means new connections keep arriving at a closing listener,
+// which is the usual source of 502s during a rolling deploy.
+func (h *Handler) BeginDrain() { h.draining.Store(true) }
+
+// Liveness always returns 200 while the process is up, including while
+// draining: a liveness failure tells the orchestrator to kill the process,
+// which is the opposite of what a graceful shutdown wants.
 func (h *Handler) Liveness(w http.ResponseWriter, _ *http.Request) {
 	handler.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Readiness returns 503 only when a required dependency fails its ping.
+// Readiness returns 503 while draining, or when a required dependency fails
+// its ping.
 func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
+	if h.draining.Load() {
+		handler.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "draining",
+		})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 

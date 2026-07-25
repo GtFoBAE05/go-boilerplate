@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go-boilerplate/internal/cache"
+	"go-boilerplate/internal/platform/cache"
 	"go-boilerplate/internal/repository"
 	"go-boilerplate/internal/service"
 
@@ -188,10 +188,17 @@ func (s *svc) Delete(ctx context.Context, id int64) error {
 	)
 	defer span.End()
 
-	if err := s.repo.DeleteUser(ctx, id); err != nil {
+	rows, err := s.repo.DeleteUser(ctx, id)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "delete user failed")
 		return fmt.Errorf("delete user %d: %w", id, err)
+	}
+	if rows == 0 {
+		// Report the miss instead of a silent 204, so a caller deleting the
+		// wrong id finds out. Costs idempotency: a repeated DELETE 404s.
+		span.SetStatus(codes.Error, "user not found")
+		return service.ErrNotFound
 	}
 	if s.cache != nil {
 		if err := s.cache.Delete(ctx, cacheKey(id)); err != nil {

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"go-boilerplate/internal/postgres"
+	"go-boilerplate/internal/platform/postgres"
 	"go-boilerplate/internal/repository"
 	"go-boilerplate/internal/service"
 
@@ -122,11 +122,43 @@ func TestUserRepositoryCRUD(t *testing.T) {
 		t.Fatalf("list limit/offset: want [%d], got %+v", second.ID, list)
 	}
 
-	// Delete, then confirm the row is gone (ErrNoRows).
-	if err := store.DeleteUser(ctx, created.ID); err != nil {
+	// Update bumps updated_at past created_at, which is what lets a client
+	// tell a modified row from a fresh one.
+	updated, err := store.UpdateUser(ctx, repository.UpdateUserParams{
+		ID:    created.ID,
+		Name:  "alice renamed",
+		Email: created.Email,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Name != "alice renamed" {
+		t.Fatalf("update: want renamed row, got %+v", updated)
+	}
+	if !updated.UpdatedAt.After(created.UpdatedAt) {
+		t.Fatalf("update: updated_at not advanced (created %s, updated %s)",
+			created.UpdatedAt, updated.UpdatedAt)
+	}
+
+	// Delete reports rows affected, which is what the service turns into a 404
+	// instead of a silent 204.
+	rows, err := store.DeleteUser(ctx, created.ID)
+	if err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("delete: want 1 row affected, got %d", rows)
 	}
 	if _, err := store.GetUser(ctx, created.ID); err != pgx.ErrNoRows {
 		t.Fatalf("get after delete: want pgx.ErrNoRows, got %v", err)
+	}
+
+	// Deleting again affects nothing; the service maps this to ErrNotFound.
+	rows, err = store.DeleteUser(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("delete missing row: unexpected error %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("delete missing row: want 0 rows affected, got %d", rows)
 	}
 }

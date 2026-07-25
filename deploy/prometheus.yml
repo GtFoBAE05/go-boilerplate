@@ -6,4 +6,5 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       # App runs on the host during development; Prometheus runs in Docker.
+      # /metrics is on the main server port, outside the rate-limited subtree.
       - targets: ["host.docker.internal:8080"]

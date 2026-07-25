@@ -1,6 +1,11 @@
-// Package observability wires OpenTelemetry tracing (OTLP/gRPC) and metrics
-// (Prometheus exporter served on /metrics).
-package observability
+// Package telemetry wires the three signals this app emits: structured logs
+// (NewLogger), OpenTelemetry traces over OTLP/gRPC, and metrics via a
+// Prometheus exporter (Setup).
+//
+// Logging and tracing live together because they are one seam, not two: the
+// logger's handler reads the active span to stamp trace_id/span_id, so log
+// correlation only works when both are configured consistently.
+package telemetry
 
 import (
 	"context"

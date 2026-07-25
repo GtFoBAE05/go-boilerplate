@@ -12,7 +12,7 @@ import (
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (name, email)
 VALUES ($1, $2)
-RETURNING id, name, email, created_at
+RETURNING id, name, email, created_at, updated_at
 `
 
 type CreateUserParams struct {
@@ -28,22 +28,28 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.Name,
 		&i.Email,
 		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
-const deleteUser = `-- name: DeleteUser :exec
+const deleteUser = `-- name: DeleteUser :execrows
 DELETE FROM users
 WHERE id = $1
 `
 
-func (q *Queries) DeleteUser(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, deleteUser, id)
-	return err
+// DeleteUser reports rows affected (:execrows, not :exec) so the service can
+// tell "deleted" from "never existed" and return 404 instead of a silent 204.
+func (q *Queries) DeleteUser(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUser, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, name, email, created_at
+SELECT id, name, email, created_at, updated_at
 FROM users
 WHERE id = $1
 `
@@ -56,12 +62,13 @@ func (q *Queries) GetUser(ctx context.Context, id int64) (User, error) {
 		&i.Name,
 		&i.Email,
 		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const getUserForUpdate = `-- name: GetUserForUpdate :one
-SELECT id, name, email, created_at
+SELECT id, name, email, created_at, updated_at
 FROM users
 WHERE id = $1
 FOR UPDATE
@@ -75,12 +82,13 @@ func (q *Queries) GetUserForUpdate(ctx context.Context, id int64) (User, error) 
 		&i.Name,
 		&i.Email,
 		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, name, email, created_at
+SELECT id, name, email, created_at, updated_at
 FROM users
 ORDER BY id
 LIMIT $1 OFFSET $2
@@ -105,6 +113,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.Name,
 			&i.Email,
 			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -118,9 +127,9 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 
 const updateUser = `-- name: UpdateUser :one
 UPDATE users
-SET name = $2, email = $3
+SET name = $2, email = $3, updated_at = now()
 WHERE id = $1
-RETURNING id, name, email, created_at
+RETURNING id, name, email, created_at, updated_at
 `
 
 type UpdateUserParams struct {
@@ -137,6 +146,7 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 		&i.Name,
 		&i.Email,
 		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

@@ -13,6 +13,7 @@ type User struct {
 	Name      string
 	Email     string
 	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 func toUser(u repository.User) User {
@@ -21,6 +22,7 @@ func toUser(u repository.User) User {
 		Name:      u.Name,
 		Email:     u.Email,
 		CreatedAt: u.CreatedAt,
+		UpdatedAt: u.UpdatedAt,
 	}
 }
 

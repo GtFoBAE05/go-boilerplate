@@ -20,6 +20,7 @@ type fakeStore struct {
 	getUserForUpdate func(ctx context.Context, id int64) (repository.User, error)
 	createUser       func(ctx context.Context, arg repository.CreateUserParams) (repository.User, error)
 	updateUser       func(ctx context.Context, arg repository.UpdateUserParams) (repository.User, error)
+	deleteUser       func(ctx context.Context, id int64) (int64, error)
 }
 
 var _ repository.Store = (*fakeStore)(nil)
@@ -38,6 +39,10 @@ func (f *fakeStore) CreateUser(ctx context.Context, arg repository.CreateUserPar
 
 func (f *fakeStore) UpdateUser(ctx context.Context, arg repository.UpdateUserParams) (repository.User, error) {
 	return f.updateUser(ctx, arg)
+}
+
+func (f *fakeStore) DeleteUser(ctx context.Context, id int64) (int64, error) {
+	return f.deleteUser(ctx, id)
 }
 
 func (f *fakeStore) ExecTx(_ context.Context, fn func(repository.Querier) error) error {
@@ -134,6 +139,36 @@ func TestUpdateMergesPartialInputAndInvalidatesCache(t *testing.T) {
 	}
 	if _, ok := c.store["user:7"]; ok {
 		t.Fatal("expected user:7 invalidated after update")
+	}
+}
+
+// Zero rows affected means the id never existed; the service reports that
+// rather than letting the handler answer 204.
+func TestDeleteMissingRowReturnsErrNotFound(t *testing.T) {
+	repo := &fakeStore{
+		deleteUser: func(context.Context, int64) (int64, error) { return 0, nil },
+	}
+	c := &fakeCache{store: map[string][]byte{}}
+	svc := New(repo, c, discardLogger())
+
+	err := svc.Delete(context.Background(), 42)
+	if !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestDeleteInvalidatesCache(t *testing.T) {
+	repo := &fakeStore{
+		deleteUser: func(context.Context, int64) (int64, error) { return 1, nil },
+	}
+	c := &fakeCache{store: map[string][]byte{"user:7": []byte("stale")}}
+	svc := New(repo, c, discardLogger())
+
+	if err := svc.Delete(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := c.store["user:7"]; ok {
+		t.Fatal("expected user:7 invalidated after delete")
 	}
 }
 
