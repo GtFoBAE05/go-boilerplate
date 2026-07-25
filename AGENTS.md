@@ -26,6 +26,8 @@ On this Windows machine `-race` fails (`cc1.exe: 64-bit mode not compiled in` �
 
 Request flow: `internal/handler/<resource>` → `internal/service/<resource>` → `internal/repository` (sqlc/pgx), with the service consulting Redis (cache-aside) before Postgres on reads.
 
+The cache-aside in `service/user` **demonstrates the pattern; it is not a recommendation to cache every read.** A primary-key lookup is sub-millisecond in Postgres — caching it buys no latency and adds an invalidation surface. When copying the vertical, delete the four `s.cache != nil` blocks unless the new resource has measured read pressure.
+
 **Adding a resource** is a copy-paste of the `user` vertical — it exists as the template:
 1. `make migrate-new` → write SQL in `db/migrations/` (goose format, up+down in one file)
 2. Add queries in `db/queries/` → `make sqlc` (sqlc reads the migrations dir as schema)
@@ -37,6 +39,7 @@ Request flow: `internal/handler/<resource>` → `internal/service/<resource>` �
 - Domain errors live in `internal/service/errors.go`; services map storage errors (e.g. `service.IsUniqueViolation`) to them, and `WriteServiceError` maps them to HTTP once for all resources. Unmapped errors become logged 500s.
 - Request decoding goes through `handler.DecodeValid[T]` — it enforces the 1 MiB body cap, unknown-field rejection, and `validate` struct tags.
 - Config: every knob is yaml in `config.yaml` + `APP_*` env override + a default and validation in `internal/config`. Never read env vars directly.
+- Only the composition layer imports `internal/config`: `app/` (unpacks it) and `server/` (app-specific by nature). Infra packages — `postgres`, `redis`, `logger`, `observability`, `cache` — take plain values plus functional options, so tests and tools can construct them without a `config.Config`. Policy decisions (is tracing on, is Redis required) are resolved in `app.go` and passed down as data, not re-read from config downstream.
 - Cache is nilable by design: `cache.Cache` interface, nil means run uncached (redis.mode=disabled/optional). Keep nil checks when touching services; never pass a typed-nil `*cache.Cache` (see app.go comment).
 - Transactions: read-modify-write goes through `repository.Store.ExecTx` with `FOR UPDATE` (see user Update).
 - `internal/repository` is sqlc-generated except `store.go` — never hand-edit generated files; CI's `sqlc diff` job fails on drift.
