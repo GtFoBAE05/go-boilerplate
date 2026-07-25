@@ -8,19 +8,31 @@ import (
 	"fmt"
 	"time"
 
-	"go-boilerplate/internal/config"
-
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// Option tunes the client before it connects. Unset options keep go-redis'
+// own defaults (no password, DB 0).
+type Option func(*goredis.Options)
+
+// Password authenticates against a password-protected server.
+func Password(p string) Option {
+	return func(o *goredis.Options) { o.Password = p }
+}
+
+// DB selects the numbered logical database.
+func DB(db int) Option {
+	return func(o *goredis.Options) { o.DB = db }
+}
+
 // New creates a Redis client and verifies connectivity.
-func New(ctx context.Context, cfg config.RedisConfig) (*goredis.Client, error) {
-	client := goredis.NewClient(&goredis.Options{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		DB:       cfg.DB,
-	})
+func New(ctx context.Context, addr string, opts ...Option) (*goredis.Client, error) {
+	clientOpts := &goredis.Options{Addr: addr}
+	for _, opt := range opts {
+		opt(clientOpts)
+	}
+	client := goredis.NewClient(clientOpts)
 
 	// Every command becomes a child span of the caller's context, so cache
 	// hits/misses show up inside the request trace.

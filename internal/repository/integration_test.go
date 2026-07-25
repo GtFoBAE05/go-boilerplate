@@ -51,7 +51,8 @@ func setupPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connection string: %v", err)
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	// Reuse the production constructor so the otelpgx tracer is exercised too.
+	pool, err := postgres.NewPool(ctx, dsn)
 	if err != nil {
 		t.Fatalf("open pool: %v", err)
 	}

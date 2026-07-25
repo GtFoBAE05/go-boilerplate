@@ -5,21 +5,39 @@ import (
 	"fmt"
 	"time"
 
-	"go-boilerplate/internal/config"
-
 	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Option tunes the pool before it is opened. Unset options keep pgx's own
+// defaults, so callers that only have a DSN (tests, one-off tools) can call
+// NewPool with no options and still get the production tracer.
+type Option func(*pgxpool.Config)
+
+// MaxConns caps the pool size.
+func MaxConns(n int32) Option {
+	return func(c *pgxpool.Config) { c.MaxConns = n }
+}
+
+// MinConns keeps n connections warm.
+func MinConns(n int32) Option {
+	return func(c *pgxpool.Config) { c.MinConns = n }
+}
+
+// MaxConnLifetime retires a connection after d, regardless of health.
+func MaxConnLifetime(d time.Duration) Option {
+	return func(c *pgxpool.Config) { c.MaxConnLifetime = d }
+}
+
 // NewPool creates a pgx connection pool and verifies connectivity.
-func NewPool(ctx context.Context, cfg config.PostgresConfig) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
+func NewPool(ctx context.Context, dsn string, opts ...Option) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres dsn: %w", err)
 	}
-	poolCfg.MaxConns = cfg.MaxConns
-	poolCfg.MinConns = cfg.MinConns
-	poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
+	for _, opt := range opts {
+		opt(poolCfg)
+	}
 
 	// Every query becomes a child span of the caller's context, so traces
 	// run handler → service → SQL. Span names carry the trimmed statement.
