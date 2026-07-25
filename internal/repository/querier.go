@@ -10,6 +10,8 @@ import (
 
 type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// DeleteUser reports rows affected (:execrows, not :exec) so the service can
+	// tell "deleted" from "never existed" and return 404 instead of a silent 204.
 	DeleteUser(ctx context.Context, id int64) (int64, error)
 	GetUser(ctx context.Context, id int64) (User, error)
 	GetUserForUpdate(ctx context.Context, id int64) (User, error)
