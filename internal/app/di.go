@@ -19,7 +19,7 @@ func buildDeps(pool *pgxpool.Pool, rdb *goredis.Client, redisRequired bool, svcC
 	repo := repository.NewStore(pool)
 
 	return server.Deps{
-		Users:         usersvc.New(repo, svcCache, log),
+		Users:         usersvc.NewUserService(repo, svcCache, log),
 		Pool:          pool,
 		Redis:         rdb,
 		RedisRequired: redisRequired,

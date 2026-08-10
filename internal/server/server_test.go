@@ -24,9 +24,9 @@ import (
 
 // stubUserService lets the router build without a real service; List returns
 // empty so allowed requests succeed and we can observe the 429 on overflow.
-type stubUserService struct{ usersvc.Service }
+type stubUserService struct{ usersvc.UserService }
 
-func (stubUserService) List(context.Context, int32, int32) ([]usersvc.User, error) {
+func (stubUserService) List(context.Context, int32, int32) ([]usersvc.ListOutput, error) {
 	return nil, nil
 }
 

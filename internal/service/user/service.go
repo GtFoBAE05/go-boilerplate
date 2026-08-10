@@ -23,27 +23,25 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Service is the user business-logic contract consumed by handlers.
-type Service interface {
-	Create(ctx context.Context, in CreateInput) (User, error)
-	Get(ctx context.Context, id int64) (User, error)
-	List(ctx context.Context, limit, offset int32) ([]User, error)
-	Update(ctx context.Context, id int64, in UpdateInput) (User, error)
+// UserService is the user business-logic contract consumed by handlers.
+type UserService interface {
+	Create(ctx context.Context, in CreateInput) (CreateOutput, error)
+	Get(ctx context.Context, id int64) (GetOutput, error)
+	List(ctx context.Context, limit, offset int32) ([]ListOutput, error)
+	Update(ctx context.Context, id int64, in UpdateInput) (UpdateOutput, error)
 	Delete(ctx context.Context, id int64) error
 }
 
-type svc struct {
+type userService struct {
 	repo   repository.Store
 	cache  cache.Cache
 	log    *slog.Logger
 	tracer trace.Tracer
 }
 
-var _ Service = (*svc)(nil)
-
-// New builds the user Service; pass a nil cache to run uncached.
-func New(repo repository.Store, c cache.Cache, log *slog.Logger) Service {
-	return &svc{
+// NewUserService builds the user service; pass a nil cache to run uncached.
+func NewUserService(repo repository.Store, c cache.Cache, log *slog.Logger) UserService {
+	return &userService{
 		repo:   repo,
 		cache:  c,
 		log:    log,
@@ -53,7 +51,7 @@ func New(repo repository.Store, c cache.Cache, log *slog.Logger) Service {
 
 func cacheKey(id int64) string { return fmt.Sprintf("user:%d", id) }
 
-func (s *svc) Create(ctx context.Context, in CreateInput) (User, error) {
+func (s *userService) Create(ctx context.Context, in CreateInput) (CreateOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.Create",
 		trace.WithAttributes(attribute.String("user.email", in.Email)),
 	)
@@ -64,23 +62,24 @@ func (s *svc) Create(ctx context.Context, in CreateInput) (User, error) {
 		if service.IsUniqueViolation(err) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "email already taken")
-			return User{}, service.ErrEmailTaken
+			return CreateOutput{}, service.ErrEmailTaken
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "create user failed")
-		return User{}, fmt.Errorf("create user: %w", err)
+		return CreateOutput{}, fmt.Errorf("create user: %w", err)
 	}
 	span.SetAttributes(attribute.Int64("user.id", user.ID))
-	return toUser(user), nil
+	return toCreateOutput(user), nil
 }
 
-func (s *svc) Get(ctx context.Context, id int64) (User, error) {
+func (s *userService) Get(ctx context.Context, id int64) (GetOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.Get",
 		trace.WithAttributes(attribute.Int64("user.id", id)),
 	)
 	defer span.End()
 
-	var user User
+	// UserCache, not GetOutput: the stored shape stays one type as Outputs multiply.
+	var user UserCache
 	if s.cache != nil {
 		hit, err := s.cache.Get(ctx, cacheKey(id), &user)
 		if err != nil {
@@ -88,7 +87,7 @@ func (s *svc) Get(ctx context.Context, id int64) (User, error) {
 			s.log.WarnContext(ctx, "cache read failed", "error", err)
 		} else if hit {
 			span.SetAttributes(attribute.Bool("cache.hit", true))
-			return user, nil
+			return toGetOutput(user), nil
 		}
 	}
 	span.SetAttributes(attribute.Bool("cache.hit", false))
@@ -96,24 +95,24 @@ func (s *svc) Get(ctx context.Context, id int64) (User, error) {
 	row, err := s.repo.GetUser(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetStatus(codes.Error, "user not found")
-		return User{}, service.ErrNotFound
+		return GetOutput{}, service.ErrNotFound
 	}
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "get user failed")
-		return User{}, fmt.Errorf("get user %d: %w", id, err)
+		return GetOutput{}, fmt.Errorf("get user %d: %w", id, err)
 	}
-	user = toUser(row)
+	user = toUserCache(row)
 
 	if s.cache != nil {
 		if err := s.cache.Set(ctx, cacheKey(id), user); err != nil {
 			s.log.WarnContext(ctx, "cache write failed", "error", err)
 		}
 	}
-	return user, nil
+	return toGetOutput(user), nil
 }
 
-func (s *svc) List(ctx context.Context, limit, offset int32) ([]User, error) {
+func (s *userService) List(ctx context.Context, limit, offset int32) ([]ListOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.List",
 		trace.WithAttributes(
 			attribute.Int("db.limit", int(limit)),
@@ -129,10 +128,10 @@ func (s *svc) List(ctx context.Context, limit, offset int32) ([]User, error) {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 	span.SetAttributes(attribute.Int("db.result_count", len(users)))
-	return toUsers(users), nil
+	return toListOutputs(users), nil
 }
 
-func (s *svc) Update(ctx context.Context, id int64, in UpdateInput) (User, error) {
+func (s *userService) Update(ctx context.Context, id int64, in UpdateInput) (UpdateOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.Update",
 		trace.WithAttributes(attribute.Int64("user.id", id)),
 	)
@@ -170,7 +169,7 @@ func (s *svc) Update(ctx context.Context, id int64, in UpdateInput) (User, error
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "update user failed")
-		return User{}, err
+		return UpdateOutput{}, err
 	}
 
 	// Invalidate-on-write: drop the stale entry, the next read repopulates.
@@ -179,10 +178,10 @@ func (s *svc) Update(ctx context.Context, id int64, in UpdateInput) (User, error
 			s.log.WarnContext(ctx, "cache invalidation failed", "error", err)
 		}
 	}
-	return toUser(updated), nil
+	return toUpdateOutput(updated), nil
 }
 
-func (s *svc) Delete(ctx context.Context, id int64) error {
+func (s *userService) Delete(ctx context.Context, id int64) error {
 	ctx, span := s.tracer.Start(ctx, "UserService.Delete",
 		trace.WithAttributes(attribute.Int64("user.id", id)),
 	)

@@ -110,3 +110,36 @@ Build provenance reaches Prometheus as `target_info{service_version,vcs_ref_head
 - Line endings are LF everywhere (`.gitattributes` enforces); CRLF breaks gofumpt.
 - Tests use hand-written fakes (`fakeStore`, `mockUserService`, `stubUserService` patterns) — no mock generation tooling.
 - `internal/repository/integration_test.go` is the template integration test: testcontainers Postgres + real goose migrations + full CRUD.
+
+### Service package conventions
+
+These four rules are shared with the downstream `identity` service so a reader moving between repositories finds the same shapes. Follow them when copying the `user` vertical.
+
+**1. Service names are resource-qualified, not package-relative.** Each `internal/service/<resource>` exports `<Resource>Service` (interface), `<resource>Service` (unexported struct), and `New<Resource>Service`; the receiver matches the struct name.
+
+```go
+type UserService interface { ... }
+type userService struct { ... }
+func NewUserService(...) UserService
+func (s *userService) Create(...) ...
+```
+
+Not `Service` + `svc` + `New`. The composition layer (`app/di.go`, `server/server.go`) imports several service packages aliased, and a bare `Service` says nothing about whose it is; `grep userService` lands on one thing.
+
+This costs a `revive` exception: under package-per-resource the name reads as `user.UserService`, which the `exported` rule calls a stutter. `.golangci.yml` sets `disableStutteringCheck` for exactly this reason — the rest of the `exported` rule (doc comments on every exported symbol) still applies, so don't drop the rule wholesale.
+
+**2. No compile-time interface assertions in service packages.** Delete `var _ Service = (*svc)(nil)`. The constructor returns the interface, so an incomplete implementation already fails to compile at `return &userService{...}`.
+
+Keep the assertion where no constructor returns the interface — `repository.store`, `platform/cache.redisCache`, and the hand-written test fakes (`fakeStore`, `mockUserService`) rely on it as the only check. Never touch generated files (`repository/querier.go` is sqlc's).
+
+**3. One service package is two files.** `model.go` holds every type; `service.go` holds the interface plus the implementation. No separate `input.go` / `output.go` / `dto.go` — merge them. Split further only once `model.go` passes roughly 200 lines.
+
+**4. Method-signature types carry an `Input` / `Output` suffix, named per method** — `Create` → `CreateInput`/`CreateOutput`, `Login` → `LoginInput`/`LoginOutput`. Types nested inside an `Output` take the suffix too. A bare name (`User`, `Claims`) means the type is *not* part of a method signature.
+
+Accept the duplication this creates: `service/user` ships `CreateOutput`, `GetOutput`, `ListOutput` and `UpdateOutput` field-for-field identical. Leave duplicates until a **third** identical copy appears — merging early couples endpoints that should stay free to diverge. The handler mirrors this with one mapper per Output (`createToDetailResponse`, `getToDetailResponse`, `updateToDetailResponse`); all three build the same `DetailResponse` today.
+
+**A cached resource needs one more type.** `service/user` keeps `UserCache` — no `Input`/`Output` suffix, because it appears in no method signature. It exists because the shape stored in Redis must stay decoupled from any method's `Output`: cache a `GetOutput` and changing that signature silently invalidates every live entry. So `Get` deserializes into `UserCache` and converts at the return boundary, while `Create`, `Update` and `List` map `repository.User` straight to their `Output` and never touch it. Don't route the non-cached methods through it for symmetry — that hop buys nothing.
+
+`toGetOutput` is a `GetOutput(u)` conversion, which compiles only while the two remain field-identical. When `GetOutput` diverges, write the mapping out field by field; never reshape `UserCache` to preserve the cast, since its whole point is not tracking an Output.
+
+**What these rules must not change:** service types carry **zero struct tags** — `json`/`validate` belong on handler Request/Response types, DB tags only on generated repository types. Mapping domain → response stays in the handler (`toDetailResponse`, `toListItemResponses`); a service must never construct a response type.

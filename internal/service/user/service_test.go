@@ -82,7 +82,7 @@ func TestGetMapsNoRowsToErrNotFound(t *testing.T) {
 			return repository.User{}, pgx.ErrNoRows
 		},
 	}
-	svc := New(repo, nil, discardLogger())
+	svc := NewUserService(repo, nil, discardLogger())
 
 	_, err := svc.Get(context.Background(), 42)
 	if !errors.Is(err, service.ErrNotFound) {
@@ -97,7 +97,7 @@ func TestGetPopulatesCacheOnMiss(t *testing.T) {
 		},
 	}
 	c := &fakeCache{store: map[string][]byte{}}
-	svc := New(repo, c, discardLogger())
+	svc := NewUserService(repo, c, discardLogger())
 
 	user, err := svc.Get(context.Background(), 7)
 	if err != nil {
@@ -124,7 +124,7 @@ func TestUpdateMergesPartialInputAndInvalidatesCache(t *testing.T) {
 		},
 	}
 	c := &fakeCache{store: map[string][]byte{"user:7": []byte("stale")}}
-	svc := New(repo, c, discardLogger())
+	svc := NewUserService(repo, c, discardLogger())
 
 	name := "bob"
 	user, err := svc.Update(context.Background(), 7, UpdateInput{Name: &name})
@@ -149,7 +149,7 @@ func TestDeleteMissingRowReturnsErrNotFound(t *testing.T) {
 		deleteUser: func(context.Context, int64) (int64, error) { return 0, nil },
 	}
 	c := &fakeCache{store: map[string][]byte{}}
-	svc := New(repo, c, discardLogger())
+	svc := NewUserService(repo, c, discardLogger())
 
 	err := svc.Delete(context.Background(), 42)
 	if !errors.Is(err, service.ErrNotFound) {
@@ -162,7 +162,7 @@ func TestDeleteInvalidatesCache(t *testing.T) {
 		deleteUser: func(context.Context, int64) (int64, error) { return 1, nil },
 	}
 	c := &fakeCache{store: map[string][]byte{"user:7": []byte("stale")}}
-	svc := New(repo, c, discardLogger())
+	svc := NewUserService(repo, c, discardLogger())
 
 	if err := svc.Delete(context.Background(), 7); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -178,7 +178,7 @@ func TestUpdateNotFound(t *testing.T) {
 			return repository.User{}, pgx.ErrNoRows
 		},
 	}
-	svc := New(repo, nil, discardLogger())
+	svc := NewUserService(repo, nil, discardLogger())
 
 	name := "bob"
 	_, err := svc.Update(context.Background(), 42, UpdateInput{Name: &name})

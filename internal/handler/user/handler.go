@@ -23,12 +23,12 @@ var tracer = otel.Tracer("handler/user")
 
 // Handler serves the /users resource; see Routes for the endpoint list.
 type Handler struct {
-	svc usersvc.Service
+	svc usersvc.UserService
 	log *slog.Logger
 }
 
 // NewHandler wires the user service into the HTTP handler.
-func NewHandler(svc usersvc.Service, log *slog.Logger) *Handler {
+func NewHandler(svc usersvc.UserService, log *slog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
@@ -52,7 +52,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetAttributes(attribute.Int64("user.id", u.ID))
-	handler.OK(w, http.StatusCreated, toDetailResponse(u))
+	handler.OK(w, http.StatusCreated, createToDetailResponse(u))
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +73,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
 	}
-	handler.OK(w, http.StatusOK, toDetailResponse(u))
+	handler.OK(w, http.StatusOK, getToDetailResponse(u))
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +131,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
 	}
-	handler.OK(w, http.StatusOK, toDetailResponse(u))
+	handler.OK(w, http.StatusOK, updateToDetailResponse(u))
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {

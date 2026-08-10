@@ -49,7 +49,7 @@ func (p redisPinger) Ping(ctx context.Context) error { return p.rdb.Ping(ctx).Er
 // Deps carries everything the router needs. Adding a resource adds a field
 // here; New's signature never changes.
 type Deps struct {
-	Users usersvc.Service
+	Users usersvc.UserService
 
 	// Infrastructure handles for health checks. Redis may be nil when
 	// disabled or unreachable in optional mode.

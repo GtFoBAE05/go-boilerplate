@@ -384,7 +384,10 @@ migration files as its schema, so nothing is kept in sync by hand.
   1. `make migrate-new name=create_things` → write the up/down SQL
   2. Add queries in `db/queries/` → `make sqlc`
   3. Copy the layout of `internal/service/user/` and `internal/handler/user/`
-     (handlers import their service aliased: `thingsvc ".../service/thing"`)
+     (handlers import their service aliased: `thingsvc ".../service/thing"`).
+     Service packages are two files — `model.go` (types) and `service.go`
+     (`ThingService` + `thingService` + `NewThingService`); see the service
+     conventions in `AGENTS.md`.
   4. Wire it: construct the service in `internal/app/di.go`, add a field to
      `server.Deps`, mount the routes in `internal/server/server.go` —
      `cmd/` and `app.go` stay untouched.

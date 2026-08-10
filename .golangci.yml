@@ -14,6 +14,16 @@ linters:
     - unparam
     - whitespace
   settings:
+    revive:
+      rules:
+        # Services are named resource-qualified (UserService, NewUserService)
+        # so a grep for the name lands on one thing and composition-layer call
+        # sites read without leaning on the import alias. Under
+        # package-per-resource that reads as user.UserService, which the
+        # stutter check rejects — the naming convention wins here.
+        - name: exported
+          arguments:
+            - disableStutteringCheck
     depguard:
       rules:
         # internal/platform holds generic infrastructure adapters. They take

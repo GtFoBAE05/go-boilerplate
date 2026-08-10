@@ -14,30 +14,30 @@ import (
 	usersvc "go-boilerplate/internal/service/user"
 )
 
-// mockUserService implements usersvc.Service via configurable funcs.
+// mockUserService implements usersvc.UserService via configurable funcs.
 type mockUserService struct {
-	create func(ctx context.Context, in usersvc.CreateInput) (usersvc.User, error)
-	get    func(ctx context.Context, id int64) (usersvc.User, error)
-	list   func(ctx context.Context, limit, offset int32) ([]usersvc.User, error)
-	update func(ctx context.Context, id int64, in usersvc.UpdateInput) (usersvc.User, error)
+	create func(ctx context.Context, in usersvc.CreateInput) (usersvc.CreateOutput, error)
+	get    func(ctx context.Context, id int64) (usersvc.GetOutput, error)
+	list   func(ctx context.Context, limit, offset int32) ([]usersvc.ListOutput, error)
+	update func(ctx context.Context, id int64, in usersvc.UpdateInput) (usersvc.UpdateOutput, error)
 	del    func(ctx context.Context, id int64) error
 }
 
-var _ usersvc.Service = (*mockUserService)(nil)
+var _ usersvc.UserService = (*mockUserService)(nil)
 
-func (m *mockUserService) Create(ctx context.Context, in usersvc.CreateInput) (usersvc.User, error) {
+func (m *mockUserService) Create(ctx context.Context, in usersvc.CreateInput) (usersvc.CreateOutput, error) {
 	return m.create(ctx, in)
 }
 
-func (m *mockUserService) Get(ctx context.Context, id int64) (usersvc.User, error) {
+func (m *mockUserService) Get(ctx context.Context, id int64) (usersvc.GetOutput, error) {
 	return m.get(ctx, id)
 }
 
-func (m *mockUserService) List(ctx context.Context, limit, offset int32) ([]usersvc.User, error) {
+func (m *mockUserService) List(ctx context.Context, limit, offset int32) ([]usersvc.ListOutput, error) {
 	return m.list(ctx, limit, offset)
 }
 
-func (m *mockUserService) Update(ctx context.Context, id int64, in usersvc.UpdateInput) (usersvc.User, error) {
+func (m *mockUserService) Update(ctx context.Context, id int64, in usersvc.UpdateInput) (usersvc.UpdateOutput, error) {
 	return m.update(ctx, id, in)
 }
 
@@ -124,8 +124,8 @@ func TestCreateBodyTooLarge(t *testing.T) {
 
 func TestCreateSuccess(t *testing.T) {
 	svc := &mockUserService{
-		create: func(_ context.Context, in usersvc.CreateInput) (usersvc.User, error) {
-			return usersvc.User{ID: 1, Name: in.Name, Email: in.Email}, nil
+		create: func(_ context.Context, in usersvc.CreateInput) (usersvc.CreateOutput, error) {
+			return usersvc.CreateOutput{ID: 1, Name: in.Name, Email: in.Email}, nil
 		},
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
@@ -150,8 +150,8 @@ func TestCreateSuccess(t *testing.T) {
 
 func TestGetNotFoundMapsTo404(t *testing.T) {
 	svc := &mockUserService{
-		get: func(context.Context, int64) (usersvc.User, error) {
-			return usersvc.User{}, service.ErrNotFound
+		get: func(context.Context, int64) (usersvc.GetOutput, error) {
+			return usersvc.GetOutput{}, service.ErrNotFound
 		},
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
@@ -168,9 +168,9 @@ func TestGetNotFoundMapsTo404(t *testing.T) {
 func TestUpdatePartialBody(t *testing.T) {
 	var gotIn usersvc.UpdateInput
 	svc := &mockUserService{
-		update: func(_ context.Context, id int64, in usersvc.UpdateInput) (usersvc.User, error) {
+		update: func(_ context.Context, id int64, in usersvc.UpdateInput) (usersvc.UpdateOutput, error) {
 			gotIn = in
-			return usersvc.User{ID: id, Name: *in.Name, Email: "kept@example.com"}, nil
+			return usersvc.UpdateOutput{ID: id, Name: *in.Name, Email: "kept@example.com"}, nil
 		},
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
@@ -240,7 +240,7 @@ func TestListRejectsBadPagination(t *testing.T) {
 func TestListPassesPaginationThrough(t *testing.T) {
 	var gotLimit, gotOffset int32
 	svc := &mockUserService{
-		list: func(_ context.Context, limit, offset int32) ([]usersvc.User, error) {
+		list: func(_ context.Context, limit, offset int32) ([]usersvc.ListOutput, error) {
 			gotLimit, gotOffset = limit, offset
 			return nil, nil
 		},
