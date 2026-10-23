@@ -137,6 +137,16 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		},
 		{"unknown env", func(c *Config) { c.Service.Env = "prod" }, "service.env"},
 		{"port out of range", func(c *Config) { c.Server.Port = 70000 }, "server.port"},
+		{
+			"header timeout above read timeout",
+			func(c *Config) { c.Server.ReadHeaderTimeout = 30 * time.Second },
+			"read_header_timeout",
+		},
+		{
+			"header timeout unset",
+			func(c *Config) { c.Server.ReadHeaderTimeout = 0 },
+			"read_header_timeout",
+		},
 		{"pprof port collides", func(c *Config) { c.Pprof = platformconfig.PprofConfig{Enabled: true, Port: c.Server.Port} }, "pprof.port"},
 		{"pprof port out of range", func(c *Config) { c.Pprof = platformconfig.PprofConfig{Enabled: true, Port: 70000} }, "pprof.port"},
 		{"pprof port unset while enabled", func(c *Config) { c.Pprof = platformconfig.PprofConfig{Enabled: true} }, "pprof.port"},
@@ -304,7 +314,7 @@ func TestRedisLogValueRedactsPassword(t *testing.T) {
 func validConfig() *Config {
 	return &Config{
 		Service: platformconfig.ServiceConfig{Name: "test", Env: platformconfig.EnvProduction},
-		Server:  platformconfig.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, ShutdownTimeout: 20 * time.Second, RequestTimeout: 20 * time.Second, DrainDelay: 5 * time.Second},
+		Server:  platformconfig.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, ShutdownTimeout: 20 * time.Second, RequestTimeout: 20 * time.Second, DrainDelay: 5 * time.Second},
 		Postgres: platformconfig.PostgresConfig{
 			DSN: "postgres://app:app@localhost:5433/app", MaxConns: 25, MinConns: 2,
 			MaxConnLifetime: time.Hour, QueryExecMode: "cache_statement",

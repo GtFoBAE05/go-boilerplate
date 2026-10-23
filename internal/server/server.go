@@ -24,6 +24,11 @@ import (
 	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
+// maxHeaderBytes caps the request header size. net/http's default is the same
+// 1 MiB, but stating it here keeps the limit visible next to the timeouts: a
+// template that never mentions it reads as "unbounded".
+const maxHeaderBytes = 1 << 20
+
 // Server wraps the http.Server with the assembled router and logger.
 type Server struct {
 	http   *http.Server
@@ -156,11 +161,13 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 
 	return &Server{
 		http: &http.Server{
-			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-			Handler:      root,
-			ReadTimeout:  cfg.Server.ReadTimeout,
-			WriteTimeout: cfg.Server.WriteTimeout,
-			IdleTimeout:  cfg.Server.IdleTimeout,
+			Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+			Handler:           root,
+			ReadTimeout:       cfg.Server.ReadTimeout,
+			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			WriteTimeout:      cfg.Server.WriteTimeout,
+			IdleTimeout:       cfg.Server.IdleTimeout,
+			MaxHeaderBytes:    maxHeaderBytes,
 		},
 		log:    log,
 		health: healthHandler,

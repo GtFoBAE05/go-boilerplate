@@ -42,11 +42,17 @@ const (
 
 // ServerConfig holds the HTTP listener's port and timeout budget.
 type ServerConfig struct {
-	Port            int           `mapstructure:"port"`
-	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`
-	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	Port        int           `mapstructure:"port"`
+	ReadTimeout time.Duration `mapstructure:"read_timeout"`
+	// ReadHeaderTimeout bounds how long a client may take to send the request
+	// line and headers. read_timeout covers that too, but only as part of the
+	// whole-request budget: this is the tighter limit that stops a slowloris
+	// from holding a connection open cheaply. Must not exceed read_timeout,
+	// or it is unreachable.
+	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
+	WriteTimeout      time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
+	ShutdownTimeout   time.Duration `mapstructure:"shutdown_timeout"`
 	// RequestTimeout bounds each request's context; slow downstream calls
 	// (DB, Redis) abort when it fires and handler.WriteServiceError turns the
 	// resulting context error into a 504. Validated to stay below

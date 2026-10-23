@@ -36,6 +36,7 @@ func ValidateServer(c *ServerConfig) error {
 		val time.Duration
 	}{
 		{"server.read_timeout", c.ReadTimeout},
+		{"server.read_header_timeout", c.ReadHeaderTimeout},
 		{"server.write_timeout", c.WriteTimeout},
 		{"server.idle_timeout", c.IdleTimeout},
 		{"server.shutdown_timeout", c.ShutdownTimeout},
@@ -47,6 +48,12 @@ func ValidateServer(c *ServerConfig) error {
 	}
 	if c.DrainDelay < 0 {
 		errs = append(errs, fmt.Errorf("server.drain_delay must not be negative, got %s", c.DrainDelay))
+	}
+	// A header deadline above the whole-request deadline can never fire, which
+	// looks configured but leaves slowloris protection to the wider timeout.
+	if c.ReadHeaderTimeout > c.ReadTimeout {
+		errs = append(errs, fmt.Errorf("server.read_header_timeout (%s) must be <= server.read_timeout (%s)",
+			c.ReadHeaderTimeout, c.ReadTimeout))
 	}
 	// The 504 is written by the handler after the request context expires, so
 	// the write deadline has to outlast the request deadline or the client

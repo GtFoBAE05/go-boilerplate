@@ -43,10 +43,25 @@ func newTestServer(t *testing.T) http.Handler {
 func newTestServerWith(t *testing.T) *Server {
 	t.Helper()
 	cfg := &config.Config{
+		Server:    platformconfig.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
 		Redis:     platformconfig.RedisConfig{Mode: platformconfig.RedisModeDisabled},
 		RateLimit: platformconfig.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
 	}
 	return New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}})
+}
+
+// The header deadline is the slowloris guard; MaxHeaderBytes keeps a single
+// request from spending the connection's read budget on headers. Both are
+// asserted because neither shows up in behavior tests until under attack.
+func TestHTTPServerHeaderLimits(t *testing.T) {
+	s := newTestServerWith(t)
+
+	if got := s.http.ReadHeaderTimeout; got != 5*time.Second {
+		t.Fatalf("want ReadHeaderTimeout 5s, got %s", got)
+	}
+	if got := s.http.MaxHeaderBytes; got != maxHeaderBytes {
+		t.Fatalf("want MaxHeaderBytes %d, got %d", maxHeaderBytes, got)
+	}
 }
 
 // Without a Redis client the limiter stays in-process. That is the development
