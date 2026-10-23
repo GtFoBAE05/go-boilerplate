@@ -58,6 +58,8 @@ func TestCreateValidation(t *testing.T) {
 		{"missing email", `{"name":"alice"}`, http.StatusUnprocessableEntity, "email"},
 		{"bad email", `{"name":"alice","email":"nope"}`, http.StatusUnprocessableEntity, "email"},
 		{"name too long", `{"name":"` + strings.Repeat("x", 101) + `","email":"a@b.co"}`, http.StatusUnprocessableEntity, "name"},
+		// Normalization runs before validation, so padding is not a bypass.
+		{"whitespace-only name", `{"name":"   ","email":"a@b.co"}`, http.StatusUnprocessableEntity, "name"},
 	}
 
 	// Validation short-circuits before the service is touched, so a nil
@@ -162,6 +164,43 @@ func TestGetNotFoundMapsTo404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateTrimsBeforeService(t *testing.T) {
+	var gotIn usersvc.CreateInput
+	svc := &mockUserService{
+		create: func(_ context.Context, in usersvc.CreateInput) (usersvc.CreateOutput, error) {
+			gotIn = in
+			return usersvc.CreateOutput{ID: 1, Name: in.Name, Email: in.Email}, nil
+		},
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+
+	body := `{"name":"  alice  ","email":" a@b.co "}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if gotIn.Name != "alice" || gotIn.Email != "a@b.co" {
+		t.Fatalf("service must receive normalized input, got %+v", gotIn)
+	}
+}
+
+// Normalization runs before validation, so a whitespace-only update is a 422
+// rather than an empty string written over a real value.
+func TestUpdateWhitespaceOnlyNameRejected(t *testing.T) {
+	h := NewHandler(nil, slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequest(http.MethodPatch, "/7", strings.NewReader(`{"name":"   "}`))
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 

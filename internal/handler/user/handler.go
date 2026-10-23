@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
@@ -44,8 +43,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u, err := h.svc.Create(ctx, usersvc.CreateInput{
-		Name:  strings.TrimSpace(req.Name),
-		Email: strings.TrimSpace(req.Email),
+		Name:  req.Name,
+		Email: req.Email,
 	})
 	if err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
@@ -123,8 +122,6 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			"at least one of name or email must be provided")
 		return
 	}
-	trim(req.Name)
-	trim(req.Email)
 
 	u, err := h.svc.Update(ctx, id, usersvc.UpdateInput{Name: req.Name, Email: req.Email})
 	if err != nil {
@@ -154,12 +151,6 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handler.NoContent(w)
-}
-
-func trim(s *string) {
-	if s != nil {
-		*s = strings.TrimSpace(*s)
-	}
 }
 
 func pathID(r *http.Request) (int64, error) {
