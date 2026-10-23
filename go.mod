@@ -1,6 +1,6 @@
 module github.com/GtFoBAE05/go-boilerplate
 
-go 1.25.12
+go 1.27.1
 
 require (
 	github.com/exaring/otelpgx v0.11.1

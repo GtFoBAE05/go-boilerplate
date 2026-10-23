@@ -1,7 +1,7 @@
 # go-boilerplate
 
 [![CI](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml/badge.svg)](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml)
-![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)
+![Go Version](https://img.shields.io/badge/go-1.27-00ADD8?logo=go)
 
 Production-ready Go HTTP API boilerplate: clone it, rename the module, copy the
 example resource, and start writing business logic. Community-standard layout
@@ -39,7 +39,7 @@ them generically and never grows a case per resource.
 
 ## Quickstart
 
-Prerequisites: Go 1.25+, Docker.
+Prerequisites: Go 1.27+, Docker.
 
 ```bash
 cp .env.example .env      # local settings; without it you get production defaults
