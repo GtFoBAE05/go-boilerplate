@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	migrations "go-boilerplate/db/migrations"
+	migrations "github.com/GtFoBAE05/go-boilerplate/db/migrations"
 )
 
 // Migrate applies all pending goose migrations against pool. It runs at boot so

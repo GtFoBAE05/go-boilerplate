@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }

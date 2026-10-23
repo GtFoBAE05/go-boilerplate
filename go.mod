@@ -1,4 +1,4 @@
-module go-boilerplate
+module github.com/GtFoBAE05/go-boilerplate
 
 go 1.25.12
 

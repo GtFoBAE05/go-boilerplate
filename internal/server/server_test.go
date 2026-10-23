@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"go-boilerplate/internal/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/config"
 
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -19,7 +19,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 // stubUserService lets the router build without a real service; List returns

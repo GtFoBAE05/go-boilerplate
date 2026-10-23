@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 // mockUserService implements usersvc.UserService via configurable funcs.

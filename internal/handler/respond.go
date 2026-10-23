@@ -16,7 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"

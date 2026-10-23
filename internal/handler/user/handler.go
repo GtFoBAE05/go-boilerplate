@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go-boilerplate/internal/handler"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 var tracer = otel.Tracer("handler/user")

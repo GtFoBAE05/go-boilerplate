@@ -8,10 +8,10 @@ import (
 	"net"
 	"net/http"
 
-	"go-boilerplate/internal/config"
-	"go-boilerplate/internal/handler"
-	"go-boilerplate/internal/handler/health"
-	"go-boilerplate/internal/handler/user"
+	"github.com/GtFoBAE05/go-boilerplate/internal/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler/health"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler/user"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -20,7 +20,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 // Server wraps the http.Server with the assembled router and logger.

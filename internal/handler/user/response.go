@@ -3,7 +3,7 @@ package user
 import (
 	"time"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 // One response type per representation, so each operation's shape can

@@ -3,7 +3,7 @@ package user
 import (
 	"time"
 
-	"go-boilerplate/internal/repository"
+	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
 )
 
 // UserCache is what we save in Redis. Keep it separate from the Output types.

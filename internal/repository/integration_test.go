@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"go-boilerplate/internal/platform/postgres"
-	"go-boilerplate/internal/repository"
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
+	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

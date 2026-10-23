@@ -18,9 +18,9 @@ VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo d
 COMMIT     ?= $(shell git rev-parse HEAD 2>/dev/null || echo none)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w \
-	-X go-boilerplate/internal/app.version=$(VERSION) \
-	-X go-boilerplate/internal/app.commit=$(COMMIT) \
-	-X go-boilerplate/internal/app.buildDate=$(BUILD_DATE)
+	-X github.com/GtFoBAE05/go-boilerplate/internal/app.version=$(VERSION) \
+	-X github.com/GtFoBAE05/go-boilerplate/internal/app.commit=$(COMMIT) \
+	-X github.com/GtFoBAE05/go-boilerplate/internal/app.buildDate=$(BUILD_DATE)
 
 run: ## Run the API locally
 	go run ./cmd/api

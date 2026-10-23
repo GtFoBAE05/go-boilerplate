@@ -3,7 +3,7 @@
 //
 // Consumers import it aliased to avoid clashing with handler/user:
 //
-//	usersvc "go-boilerplate/internal/service/user"
+//	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 package user
 
 import (
@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go-boilerplate/internal/platform/cache"
-	"go-boilerplate/internal/repository"
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/cache"
+	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"

@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"go-boilerplate/internal/config"
-	"go-boilerplate/internal/platform/cache"
-	"go-boilerplate/internal/platform/postgres"
-	"go-boilerplate/internal/platform/redis"
-	"go-boilerplate/internal/platform/telemetry"
-	"go-boilerplate/internal/server"
+	"github.com/GtFoBAE05/go-boilerplate/internal/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/cache"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/redis"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/telemetry"
+	"github.com/GtFoBAE05/go-boilerplate/internal/server"
 
 	goredis "github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
