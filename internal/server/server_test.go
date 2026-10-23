@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/config"
+	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
 
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -40,8 +41,8 @@ func newTestServer(t *testing.T) http.Handler {
 func newTestServerWith(t *testing.T) *Server {
 	t.Helper()
 	cfg := &config.Config{
-		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
-		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
+		Redis:     platformconfig.RedisConfig{Mode: platformconfig.RedisModeDisabled},
+		RateLimit: platformconfig.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
 	}
 	return New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}})
 }

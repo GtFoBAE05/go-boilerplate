@@ -7,14 +7,14 @@ import (
 	"strings"
 )
 
-// parseDotEnv reads KEY=VALUE lines from path. A missing file returns a nil map
+// ParseDotEnv reads KEY=VALUE lines from path. A missing file returns a nil map
 // and no error: deployments set real environment variables and ship no file.
 //
 // It deliberately does not call os.Setenv. Mutating the process environment
-// would make Load non-idempotent and leak between tests in a shared process;
+// would make loading non-idempotent and leak between tests in a shared process;
 // returning a map lets the caller layer the values underneath the real
-// environment instead (see Load).
-func parseDotEnv(path string) (map[string]string, error) {
+// environment instead (see internal/config.Load).
+func ParseDotEnv(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -58,8 +58,8 @@ func parseDotEnv(path string) (map[string]string, error) {
 	return values, nil
 }
 
-// envKey renders a Viper key as the environment variable that overrides it:
+// EnvKey renders a Viper key as the environment variable that overrides it:
 // "server.port" -> "SERVER_PORT".
-func envKey(key string) string {
+func EnvKey(key string) string {
 	return strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
 }
