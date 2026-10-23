@@ -51,6 +51,10 @@ type errorBody struct {
 	Code    string            `json:"code"`
 	Message string            `json:"message"`
 	Fields  map[string]string `json:"fields,omitempty"`
+	// Details carries structured context the client acts on (e.g. the rules
+	// blocking a member removal). Populated from the domain error's optional
+	// Details; nil for every other error.
+	Details any `json:"details,omitempty"`
 }
 
 type errorEnvelope struct {
@@ -143,7 +147,11 @@ func WriteServiceError(w http.ResponseWriter, r *http.Request, log *slog.Logger,
 	var domainErr *service.Error
 	if errors.As(err, &domainErr) {
 		span.SetStatus(codes.Error, domainErr.Code)
-		WriteError(w, domainErr.Status, domainErr.Code, domainErr.Message)
+		WriteJSON(w, domainErr.Status, errorEnvelope{Error: errorBody{
+			Code:    domainErr.Code,
+			Message: domainErr.Message,
+			Details: domainErr.Details,
+		}})
 		return
 	}
 

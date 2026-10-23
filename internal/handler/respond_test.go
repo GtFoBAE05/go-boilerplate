@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/service"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
@@ -36,7 +37,8 @@ func TestWriteServiceErrorUsesDomainErrorMapping(t *testing.T) {
 		want *service.Error
 	}{
 		{"not found", service.ErrNotFound, service.ErrNotFound},
-		{"email taken", service.ErrEmailTaken, service.ErrEmailTaken},
+		// A resource declares its own error; this layer needs no change.
+		{"email taken", usersvc.ErrEmailTaken, usersvc.ErrEmailTaken},
 		// Wrapping must not lose the mapping: services add context with %w.
 		{"wrapped", fmt.Errorf("get user 7: %w", service.ErrNotFound), service.ErrNotFound},
 		{
@@ -64,6 +66,31 @@ func TestWriteServiceErrorUsesDomainErrorMapping(t *testing.T) {
 				t.Fatalf("want message %q, got %q", tt.want.Message, got.Message)
 			}
 		})
+	}
+}
+
+// Structured details survive the mapping; a client that must act on them (say,
+// which rules blocked a removal) should not have to parse the message text.
+func TestWriteServiceErrorCarriesDetails(t *testing.T) {
+	domainErr := service.NewError("RULES_BLOCK", http.StatusConflict, "blocked").
+		WithDetails(map[string]any{"rules": []string{"self-approval"}})
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	WriteServiceError(rec, r, discardLogger(), domainErr)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d", rec.Code)
+	}
+	got := decodeError(t, rec.Body.Bytes())
+	details, ok := got.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("want details object, got %#v", got.Details)
+	}
+	rules, ok := details["rules"].([]any)
+	if !ok || len(rules) != 1 || rules[0] != "self-approval" {
+		t.Fatalf("details did not survive the envelope: %#v", details)
 	}
 }
 
