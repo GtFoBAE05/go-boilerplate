@@ -12,6 +12,7 @@ import (
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler/health"
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler/user"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/ratelimit"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -39,6 +40,25 @@ func keyByRemoteIP(r *http.Request) (string, error) {
 		return r.RemoteAddr, nil
 	}
 	return host, nil
+}
+
+// rateLimitOptions adds the shared Redis counter when one is configured. With
+// no Redis (disabled, or optional and unreachable) the limiter stays
+// per-process: fine for development, but the cap is then one budget per replica
+// rather than a global one. A Redis error during a request fails closed with a
+// 503 instead of silently lifting the limit.
+func rateLimitOptions(client *goredis.Client, prefix string, log *slog.Logger) []httprate.Option {
+	if client == nil {
+		return nil
+	}
+	return []httprate.Option{
+		httprate.WithLimitCounter(ratelimit.RedisCounter(client, prefix)),
+		httprate.WithErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
+			log.ErrorContext(r.Context(), "distributed rate limit failed closed", "prefix", prefix, "error", err)
+			handler.WriteError(w, http.StatusServiceUnavailable, handler.CodeRateLimitUnavailable,
+				"rate limiting is temporarily unavailable")
+		}),
+	}
 }
 
 // redisPinger adapts *goredis.Client to health.Pinger.
@@ -110,13 +130,17 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 		if cfg.RateLimit.Enabled {
 			// Not httprate's KeyByRealIP: it trusts forwarded headers
 			// (GHSA-9g5q-2w5x-hmxf).
+			options := []httprate.Option{
+				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
+					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
+				}),
+			}
+			options = append(options, rateLimitOptions(deps.Redis, cfg.Service.Name+":api", log)...)
 			r.Use(httprate.LimitBy(
 				cfg.RateLimit.Requests,
 				cfg.RateLimit.Window,
 				keyByRemoteIP,
-				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
-					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
-				}),
+				options...,
 			))
 		}
 		r.Mount("/users", user.NewHandler(deps.Users, log).Routes())

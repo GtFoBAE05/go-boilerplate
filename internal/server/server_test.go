@@ -13,6 +13,8 @@ import (
 	"github.com/GtFoBAE05/go-boilerplate/internal/config"
 	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -45,6 +47,26 @@ func newTestServerWith(t *testing.T) *Server {
 		RateLimit: platformconfig.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
 	}
 	return New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}})
+}
+
+// Without a Redis client the limiter stays in-process. That is the development
+// mode, not a fallback: a silent per-replica budget in production is the bug
+// the shared counter exists to fix.
+func TestRateLimitOptionsWithoutRedis(t *testing.T) {
+	if got := rateLimitOptions(nil, "test:api", slog.New(slog.DiscardHandler)); got != nil {
+		t.Fatalf("want no shared counter options, got %d", len(got))
+	}
+}
+
+// With a client, both the counter and the fail-closed handler are wired in.
+func TestRateLimitOptionsWithRedis(t *testing.T) {
+	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:0"})
+	defer func() { _ = client.Close() }()
+
+	got := rateLimitOptions(client, "test:api", slog.New(slog.DiscardHandler))
+	if len(got) != 2 {
+		t.Fatalf("want counter + error handler, got %d options", len(got))
+	}
 }
 
 func TestRateLimitEnvelope(t *testing.T) {
