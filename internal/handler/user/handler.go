@@ -153,7 +153,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	handler.NoContent(w)
 }
 
 func trim(s *string) {

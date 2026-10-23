@@ -100,6 +100,14 @@ func OKList(w http.ResponseWriter, data any, meta Meta) {
 	WriteJSON(w, http.StatusOK, successEnvelope{Data: data, Meta: &meta})
 }
 
+// NoContent writes a 204 with no body. It exists so a handler that returns no
+// data still goes through this file: "every response through respond.go" is an
+// invariant worth keeping literally true, or the one hand-written status is
+// where a future envelope change quietly stops applying.
+func NoContent(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // WriteError writes an error envelope: {"error": {"code", "message"}}.
 func WriteError(w http.ResponseWriter, status int, code, message string) {
 	WriteJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message}})

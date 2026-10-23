@@ -181,6 +181,21 @@ func TestWriteJSONFailsCleanlyOnUnmarshalableValue(t *testing.T) {
 	}
 }
 
+// NoContent is the one success path with no payload; it still belongs to this
+// file so the response layer stays the only writer.
+func TestNoContentWritesNoBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NoContent(rec)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("want empty body, got %q", rec.Body.String())
+	}
+}
+
 func TestWriteJSONSetsContentTypeOnNilBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 
