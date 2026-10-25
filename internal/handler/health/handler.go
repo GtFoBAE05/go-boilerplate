@@ -25,7 +25,7 @@ type Handler struct {
 	// required dependencies fail readiness (503) when down.
 	required map[string]Pinger
 	// optional dependencies are reported but never fail readiness —
-	// the app can serve traffic without them (e.g. cache).
+	// the app can serve traffic without them (e.g. Redis).
 	optional map[string]Pinger
 	// draining makes readiness fail while the process is shutting down.
 	// Read on every probe and written once from the shutdown path, hence atomic.

@@ -1,5 +1,5 @@
-// Package user implements the user business logic: cache-aside reads,
-// transactional writes, and storage-error → domain-error mapping.
+// Package user implements the user business logic: transactional writes and
+// storage-error → domain-error mapping.
 //
 // Consumers import it aliased to avoid clashing with handler/user:
 //
@@ -11,8 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
-	"github.com/GtFoBAE05/go-boilerplate/internal/platform/cache"
 	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
 	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
@@ -26,43 +26,53 @@ import (
 // ErrEmailTaken is this resource's failure, not a shared one: only user writes
 // enforce a unique email. Declared here so the shared error file never grows a
 // case per resource.
-var ErrEmailTaken = service.NewError("EMAIL_TAKEN", 409, "email already taken")
+var ErrEmailTaken = service.NewError("EMAIL_TAKEN", service.KindConflict, "email already taken")
 
 // UserService is the user business-logic contract consumed by handlers.
 type UserService interface {
 	Create(ctx context.Context, in CreateInput) (CreateOutput, error)
-	Get(ctx context.Context, id int64) (GetOutput, error)
-	List(ctx context.Context, limit, offset int32) ([]ListOutput, error)
-	Update(ctx context.Context, id int64, in UpdateInput) (UpdateOutput, error)
-	Delete(ctx context.Context, id int64) error
+	Get(ctx context.Context, in GetInput) (GetOutput, error)
+	List(ctx context.Context, in ListInput) ([]ListOutput, error)
+	Update(ctx context.Context, in UpdateInput) (UpdateOutput, error)
+	Delete(ctx context.Context, in DeleteInput) error
 }
 
 type userService struct {
 	repo   repository.Store
-	cache  cache.Cache
 	log    *slog.Logger
 	tracer trace.Tracer
 }
 
-// NewUserService builds the user service; pass a nil cache to run uncached.
-func NewUserService(repo repository.Store, c cache.Cache, log *slog.Logger) UserService {
+// NewUserService builds the user service.
+func NewUserService(repo repository.Store, log *slog.Logger) UserService {
 	return &userService{
 		repo:   repo,
-		cache:  c,
 		log:    log,
 		tracer: otel.Tracer("service/user"),
 	}
 }
 
-func cacheKey(id int64) string { return fmt.Sprintf("user:%d", id) }
+// isEmailConflict distinguishes the email rule from any other unique index on
+// users. The constraint name is a storage detail, so the inspection lives in
+// repository and the service only asks which rule fired.
+func isEmailConflict(err error) bool {
+	return repository.IsUniqueViolation(err) &&
+		strings.Contains(repository.ConstraintName(err), "email")
+}
 
 func (s *userService) Create(ctx context.Context, in CreateInput) (CreateOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.Create")
 	defer span.End()
 
+	in.Normalize()
+	if err := in.Validate(); err != nil {
+		span.SetStatus(codes.Error, "validation failed")
+		return CreateOutput{}, err
+	}
+
 	user, err := s.repo.CreateUser(ctx, repository.CreateUserParams{Name: in.Name, Email: in.Email})
 	if err != nil {
-		if service.IsUniqueViolation(err) {
+		if isEmailConflict(err) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "email already taken")
 			return CreateOutput{}, ErrEmailTaken
@@ -72,30 +82,17 @@ func (s *userService) Create(ctx context.Context, in CreateInput) (CreateOutput,
 		return CreateOutput{}, fmt.Errorf("create user: %w", err)
 	}
 	span.SetAttributes(attribute.Int64("user.id", user.ID))
+	s.log.DebugContext(ctx, "user created", "user_id", user.ID)
 	return toCreateOutput(user), nil
 }
 
-func (s *userService) Get(ctx context.Context, id int64) (GetOutput, error) {
+func (s *userService) Get(ctx context.Context, in GetInput) (GetOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.Get",
-		trace.WithAttributes(attribute.Int64("user.id", id)),
+		trace.WithAttributes(attribute.Int64("user.id", in.ID)),
 	)
 	defer span.End()
 
-	// UserCache, not GetOutput: the stored shape stays one type as Outputs multiply.
-	var user UserCache
-	if s.cache != nil {
-		hit, err := s.cache.Get(ctx, cacheKey(id), &user)
-		if err != nil {
-			// Cache failure is not fatal; fall through to the database.
-			s.log.WarnContext(ctx, "cache read failed", "error", err)
-		} else if hit {
-			span.SetAttributes(attribute.Bool("cache.hit", true))
-			return toGetOutput(user), nil
-		}
-	}
-	span.SetAttributes(attribute.Bool("cache.hit", false))
-
-	row, err := s.repo.GetUser(ctx, id)
+	row, err := s.repo.GetUser(ctx, in.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetStatus(codes.Error, "user not found")
 		return GetOutput{}, service.ErrNotFound
@@ -103,28 +100,21 @@ func (s *userService) Get(ctx context.Context, id int64) (GetOutput, error) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "get user failed")
-		return GetOutput{}, fmt.Errorf("get user %d: %w", id, err)
+		return GetOutput{}, fmt.Errorf("get user %d: %w", in.ID, err)
 	}
-	user = toUserCache(row)
-
-	if s.cache != nil {
-		if err := s.cache.Set(ctx, cacheKey(id), user); err != nil {
-			s.log.WarnContext(ctx, "cache write failed", "error", err)
-		}
-	}
-	return toGetOutput(user), nil
+	return toGetOutput(row), nil
 }
 
-func (s *userService) List(ctx context.Context, limit, offset int32) ([]ListOutput, error) {
+func (s *userService) List(ctx context.Context, in ListInput) ([]ListOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.List",
 		trace.WithAttributes(
-			attribute.Int("db.limit", int(limit)),
-			attribute.Int("db.offset", int(offset)),
+			attribute.Int("db.limit", int(in.Limit)),
+			attribute.Int("db.offset", int(in.Offset)),
 		),
 	)
 	defer span.End()
 
-	users, err := s.repo.ListUsers(ctx, repository.ListUsersParams{Limit: limit, Offset: offset})
+	users, err := s.repo.ListUsers(ctx, repository.ListUsersParams{Limit: in.Limit, Offset: in.Offset})
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list users failed")
@@ -134,25 +124,31 @@ func (s *userService) List(ctx context.Context, limit, offset int32) ([]ListOutp
 	return toListOutputs(users), nil
 }
 
-func (s *userService) Update(ctx context.Context, id int64, in UpdateInput) (UpdateOutput, error) {
+func (s *userService) Update(ctx context.Context, in UpdateInput) (UpdateOutput, error) {
 	ctx, span := s.tracer.Start(ctx, "UserService.Update",
-		trace.WithAttributes(attribute.Int64("user.id", id)),
+		trace.WithAttributes(attribute.Int64("user.id", in.ID)),
 	)
 	defer span.End()
+
+	in.Normalize()
+	if err := in.Validate(); err != nil {
+		span.SetStatus(codes.Error, "validation failed")
+		return UpdateOutput{}, err
+	}
 
 	// Read-modify-write inside one transaction: FOR UPDATE locks the row so
 	// two concurrent partial updates can't overwrite each other's fields.
 	var updated repository.User
 	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
-		current, err := q.GetUserForUpdate(ctx, id)
+		current, err := q.GetUserForUpdate(ctx, in.ID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return service.ErrNotFound
 		}
 		if err != nil {
-			return fmt.Errorf("lock user %d: %w", id, err)
+			return fmt.Errorf("lock user %d: %w", in.ID, err)
 		}
 
-		params := repository.UpdateUserParams{ID: id, Name: current.Name, Email: current.Email}
+		params := repository.UpdateUserParams{ID: in.ID, Name: current.Name, Email: current.Email}
 		if in.Name != nil {
 			params.Name = *in.Name
 		}
@@ -162,10 +158,10 @@ func (s *userService) Update(ctx context.Context, id int64, in UpdateInput) (Upd
 
 		updated, err = q.UpdateUser(ctx, params)
 		if err != nil {
-			if service.IsUniqueViolation(err) {
+			if isEmailConflict(err) {
 				return ErrEmailTaken
 			}
-			return fmt.Errorf("update user %d: %w", id, err)
+			return fmt.Errorf("update user %d: %w", in.ID, err)
 		}
 		return nil
 	})
@@ -175,26 +171,21 @@ func (s *userService) Update(ctx context.Context, id int64, in UpdateInput) (Upd
 		return UpdateOutput{}, err
 	}
 
-	// Invalidate-on-write: drop the stale entry, the next read repopulates.
-	if s.cache != nil {
-		if err := s.cache.Delete(ctx, cacheKey(id)); err != nil {
-			s.log.WarnContext(ctx, "cache invalidation failed", "error", err)
-		}
-	}
+	s.log.DebugContext(ctx, "user updated", "user_id", updated.ID)
 	return toUpdateOutput(updated), nil
 }
 
-func (s *userService) Delete(ctx context.Context, id int64) error {
+func (s *userService) Delete(ctx context.Context, in DeleteInput) error {
 	ctx, span := s.tracer.Start(ctx, "UserService.Delete",
-		trace.WithAttributes(attribute.Int64("user.id", id)),
+		trace.WithAttributes(attribute.Int64("user.id", in.ID)),
 	)
 	defer span.End()
 
-	rows, err := s.repo.DeleteUser(ctx, id)
+	rows, err := s.repo.DeleteUser(ctx, in.ID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "delete user failed")
-		return fmt.Errorf("delete user %d: %w", id, err)
+		return fmt.Errorf("delete user %d: %w", in.ID, err)
 	}
 	if rows == 0 {
 		// Report the miss instead of a silent 204, so a caller deleting the
@@ -202,10 +193,6 @@ func (s *userService) Delete(ctx context.Context, id int64) error {
 		span.SetStatus(codes.Error, "user not found")
 		return service.ErrNotFound
 	}
-	if s.cache != nil {
-		if err := s.cache.Delete(ctx, cacheKey(id)); err != nil {
-			s.log.WarnContext(ctx, "cache invalidation failed", "error", err)
-		}
-	}
+	s.log.DebugContext(ctx, "user deleted", "user_id", in.ID)
 	return nil
 }

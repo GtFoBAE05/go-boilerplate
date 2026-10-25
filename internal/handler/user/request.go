@@ -7,14 +7,17 @@ import "strings"
 // be stored as "" is rejected instead.
 func (r *CreateRequest) Normalize() {
 	r.Name = strings.TrimSpace(r.Name)
-	r.Email = strings.TrimSpace(r.Email)
+	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 }
 
 // Normalize trims the fields that are present and leaves absent ones nil, so
 // the handler can still tell "not provided" from "explicitly cleared".
 func (r *UpdateRequest) Normalize() {
 	trim(r.Name)
-	trim(r.Email)
+	if r.Email != nil {
+		normalized := strings.ToLower(strings.TrimSpace(*r.Email))
+		r.Email = &normalized
+	}
 }
 
 func trim(s *string) {

@@ -13,11 +13,11 @@ package repository_test
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
 	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
-	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -102,8 +102,30 @@ func TestUserRepositoryCRUD(t *testing.T) {
 	if err == nil {
 		t.Fatalf("duplicate email: want error, got nil")
 	}
-	if !service.IsUniqueViolation(err) {
+	if !repository.IsUniqueViolation(err) {
 		t.Fatalf("duplicate email: want unique violation, got %v", err)
+	}
+	if got := repository.ConstraintName(err); !strings.Contains(got, "email") {
+		t.Fatalf("duplicate email: want an email constraint, got %q", got)
+	}
+
+	// The lower(email) index is what makes the rule case-insensitive at the
+	// storage boundary; the service normalizes, but a direct SQL writer must
+	// not be able to create the variant.
+	_, err = store.CreateUser(ctx, repository.CreateUserParams{
+		Name:  "alice3",
+		Email: "ALICE@example.com",
+	})
+	if err == nil || !repository.IsUniqueViolation(err) {
+		t.Fatalf("case-variant duplicate: want unique violation, got %v", err)
+	}
+
+	// CHECK constraints are the last line of defence for a direct SQL writer.
+	if _, err := store.CreateUser(ctx, repository.CreateUserParams{
+		Name:  "   ",
+		Email: "blank@example.com",
+	}); err == nil {
+		t.Fatal("blank name must be rejected by the database")
 	}
 
 	// List with limit/offset: add a second user, page through.

@@ -115,6 +115,9 @@ func ValidateRedis(c *RedisConfig) error {
 	var errs []error
 	switch c.Mode {
 	case RedisModeDisabled:
+		// Disabled means the app never dials; the remaining fields are
+		// intentionally ignored so a deployment can set only REDIS_MODE.
+		return nil
 	case RedisModeOptional, RedisModeRequired:
 		if c.Addr == "" {
 			errs = append(errs, fmt.Errorf("redis.addr must be set when redis.mode is %s", c.Mode))
@@ -125,21 +128,32 @@ func ValidateRedis(c *RedisConfig) error {
 	if c.DB < 0 {
 		errs = append(errs, fmt.Errorf("redis.db must not be negative, got %d", c.DB))
 	}
-	return errors.Join(errs...)
-}
-
-// ValidateCache checks the object-cache TTL. A zero TTL would make every write
-// expire immediately, which is a silent way to run uncached.
-func ValidateCache(c *CacheConfig) error {
-	if c.DefaultTTL <= 0 {
-		return fmt.Errorf("cache.default_ttl must be > 0, got %s", c.DefaultTTL)
+	if c.TLSInsecureSkipVerify && !c.TLSEnabled {
+		errs = append(errs, errors.New("redis.tls_insecure_skip_verify requires redis.tls_enabled=true"))
 	}
-	return nil
+	if c.DialTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("redis.dial_timeout must be > 0, got %s", c.DialTimeout))
+	}
+	if c.ReadTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("redis.read_timeout must be > 0, got %s", c.ReadTimeout))
+	}
+	if c.WriteTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("redis.write_timeout must be > 0, got %s", c.WriteTimeout))
+	}
+	if c.PoolSize < 1 {
+		errs = append(errs, fmt.Errorf("redis.pool_size must be >= 1, got %d", c.PoolSize))
+	}
+	return errors.Join(errs...)
 }
 
 // ValidateOTel validates only the signals that are actually exported. A broken
 // endpoint must not block boot for a deployment that exports neither.
 func ValidateOTel(c *OTelConfig) error {
+	if c.SDKDisabled {
+		// With the SDK disabled nothing is exported, so an exporter or
+		// endpoint left over from a previous deployment must not block boot.
+		return nil
+	}
 	var errs []error
 	for _, e := range []struct {
 		key   string

@@ -12,12 +12,12 @@ infra — enforced by a linter, not by convention).
 
 - **Type-safe SQL** — [sqlc](https://sqlc.dev) generates Go from raw SQL; no ORM, no reflection
 - **Versioned migrations** — [goose](https://github.com/pressly/goose) files embedded in the binary, applied at boot (or from CI in prod)
-- **Cache-aside Redis** — optional by config: disabled / degrade-gracefully / required
+- **Redis-backed rate limiting** — optional by config: disabled / degrade-gracefully / required
 - **Full observability** — OTel traces and metrics pushed over OTLP (handler → service → SQL/Redis), trace-correlated `slog` logs
 - **Hardened HTTP** — single response envelope, per-IP rate limiting, request and header deadlines, 1 MiB body cap, strict JSON validation (query params included)
 - **Loopback-only pprof** — profiling on its own private port, off by default, never on the public API
 - **Validated config** — every knob checked at boot, all errors reported at once, secrets redacted in logs
-- **Guardrail CI** — lint, race tests, testcontainers integration suite, pinned `govulncheck`, sqlc drift check, image build, Dependabot
+- **Guardrail CI** — lint, `gosec`, race tests, testcontainers integration suite, pinned `govulncheck`, sqlc drift check, `promtool check rules`, image build, Dependabot
 - **Zero-downtime shutdown** — readiness drain before the listener closes, then bounded HTTP drain and OTel flush
 
 ## Architecture
@@ -25,17 +25,17 @@ infra — enforced by a linter, not by convention).
 ```mermaid
 flowchart LR
     C[Client] --> M[chi router\nrequest-id · logging · recover\ntimeout · rate limit]
+    M -->|rate-limit counter| R[(Redis)]
     M --> H[handler\ndecode · validate · envelope]
     H --> S[service\nbusiness logic · domain errors]
-    S -->|cache-aside| R[(Redis)]
     S --> Q[repository\nsqlc + pgx]
     Q --> P[(Postgres)]
 ```
 
 Every layer owns one job: handlers never touch the database, services never
 touch HTTP, repositories never contain business rules. Domain errors carry their
-own status and code (`service.Error`), so `internal/handler/respond.go` maps
-them generically and never grows a case per resource.
+own kind and code (`service.Error`), so `internal/handler/respond.go` maps
+`Kind` to a status generically and never grows a case per resource.
 
 ## Quickstart
 
@@ -47,9 +47,10 @@ docker compose up -d      # postgres + redis + jaeger + prometheus + otel-collec
 go run ./cmd/api          # or: make run — applies goose migrations at boot
 ```
 
-The `.env` step matters: boot-time migrations are **off** by default (production
-should not have replicas racing to migrate), and `.env.example` is what turns
-them on for local development.
+The `.env` step matters: boot-time migrations are **off** by default (and
+rejected when `SERVICE_ENV=production`, because replicas racing to migrate is not
+a mode to opt into by accident). `.env.example` turns them on for local
+development.
 
 Postgres binds host port **5433** and Redis **6380** (not the defaults) so they
 never collide with natively installed instances.
@@ -59,7 +60,7 @@ never collide with natively installed instances.
 | Method | Path                 | Description                              |
 | ------ | -------------------- | ---------------------------------------- |
 | POST   | `/api/v1/users`      | Create user (409 on duplicate email)     |
-| GET    | `/api/v1/users/{id}` | Get user (second call served from Redis) |
+| GET    | `/api/v1/users/{id}` | Get user                                 |
 | GET    | `/api/v1/users`      | List users (`?limit=1..100&offset=`)     |
 | PATCH  | `/api/v1/users/{id}` | Partial update (name and/or email)       |
 | DELETE | `/api/v1/users/{id}` | Delete user (404 if it never existed)    |
@@ -84,7 +85,7 @@ curl localhost:8080/api/v1/users/1
 | Database      | PostgreSQL via [pgx/v5](https://github.com/jackc/pgx) connection pool  |
 | Query layer   | [sqlc](https://sqlc.dev) — type-safe Go generated from SQL             |
 | Migrations    | [goose](https://github.com/pressly/goose) — embedded, applied at boot  |
-| Cache         | Redis via [go-redis/v9](https://github.com/redis/go-redis), cache-aside |
+| Redis         | [go-redis/v9](https://github.com/redis/go-redis) — shared rate-limit counter |
 | Config        | [Viper](https://github.com/spf13/viper) — env vars + `.env` for dev, validated at boot |
 | Logging       | stdlib `log/slog`, JSON in prod, trace-ID correlated                   |
 | Tracing       | OpenTelemetry → OTLP/gRPC (Jaeger, Tempo, any collector)               |
@@ -97,13 +98,12 @@ cmd/api/              Entry point: loads config, calls app.Run(cfg)
 internal/
   app/                Lifecycle (app.go, stable) + DI wiring (di.go, grows per resource)
                       version.go holds -ldflags build provenance
-  config/             This app's root Config, Load, defaults (sections live in platform/config)
+  config/             This app's root Config, section types, validators, Load, defaults
   platform/           Generic infra — know nothing about this app, enforced by depguard
-    config/           Section types + per-section validators + .env parser
-    errors/           Domain error type, shared sentinels, unique-violation helper
+    config/           .env parser + DSN redaction (no app-specific sections)
+    errors/           Domain error type and transport-neutral Kind
     postgres/         pgxpool construction + goose migration runner
-    redis/            Redis client lifecycle (shared by all Redis consumers)
-    cache/            JSON cache-aside helper (one consumer of the client)
+    redis/            Redis client lifecycle (TLS, timeouts, pool options)
     ratelimit/        Shared httprate counter backed by Redis
     telemetry/        slog setup + OTel tracer/meter providers
   repository/         sqlc-generated queries (run `make sqlc`) + hand-written Store (tx wrapper)
@@ -117,6 +117,7 @@ db/
   migrations/         goose SQL migrations (embedded, applied at boot)
   queries/            sqlc query sources
 deploy/               OTel collector, Jaeger, Prometheus, and alert rule configs
+docs/                 runbook.md and slo.md (the operational contract)
 ```
 
 `internal/platform/` is the one grouped directory, and it earns the nesting by
@@ -151,8 +152,11 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
 ### Request guardrails
 
 - **Validation**: DTOs carry [go-playground/validator](https://github.com/go-playground/validator)
-  tags; failures return 422 with per-field messages. Unknown JSON fields are
-  rejected (typos fail loudly). Bodies over 1 MiB return 413.
+  tags; failures return 422 with per-field messages. Unknown JSON fields and
+  duplicate keys are rejected (a duplicate key would otherwise silently keep
+  the last value). Bodies over 1 MiB return 413. The service repeats the
+  business invariants before touching the database, and the schema enforces
+  them again (`CHECK` constraints, a `lower(email)` unique index).
 - **Pagination**: `?limit`/`?offset` are validated, not clamped — a malformed or
   out-of-range value returns 422 naming the field, rather than silently serving
   a page the client never asked for.
@@ -172,7 +176,16 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
   `<= read_timeout`) is the slowloris guard; headers are capped at 1 MiB.
 - **Timeouts**: every request gets a context deadline (`server.request_timeout`);
   downstream pgx/redis calls abort when it fires and the client gets a `504`
-  with the `TIMEOUT` code. A client that disconnects gets no body written.
+  with the `TIMEOUT` code. The timeout middleware only cancels the context; it
+  writes a fallback envelope only if the handler wrote nothing, so there is
+  never a second response on the wire. A client that disconnects gets no body
+  written.
+- **Error responses** carry `Cache-Control: no-store`; every JSON response
+  carries `X-Content-Type-Options: nosniff`. A 405 includes `Allow`, a 429
+  includes `Retry-After`, and a 503 from the limiter includes `Retry-After`.
+- **Request IDs** supplied by a client are accepted only when short and
+  alphanumeric (plus `-_.`); anything else is replaced, so a hostile header
+  cannot inject arbitrary text into every log line.
 
 ### Error codes
 
@@ -184,11 +197,12 @@ live on the error itself:
 
 ```go
 // in your resource's service package — no change to the handler layer
-var ErrOrderLocked = service.NewError("ORDER_LOCKED", http.StatusConflict, "order is locked")
+var ErrOrderLocked = service.NewError("ORDER_LOCKED", service.KindConflict, "order is locked")
 ```
 
-`WriteServiceError` finds the mapping with `errors.As`, so wrapping with `%w`
-preserves it and adding a resource never touches shared code.
+`WriteServiceError` finds the mapping with `errors.As`, maps the error's `Kind`
+to an HTTP status in one place, so wrapping with `%w` preserves it and adding a
+resource never touches shared code.
 
 ## Configuration
 
@@ -200,10 +214,12 @@ cp .env.example .env      # local development; .env is git-ignored
 ```
 
 **Precedence: environment variable > `.env` > built-in default.** The built-in
-defaults are the production-safe set (`POSTGRES_MIGRATE=false`, JSON logs at
-info, `PPROF_ENABLED=false`), so a container that ships no file and sets only
-what it needs is already sane. `.env.example` is what opts *local development* into the
-convenient values (debug text logs, migrate-on-boot).
+defaults are the production-safe set (`SERVICE_ENV=production`,
+`REDIS_MODE=required`, `POSTGRES_MIGRATE=false`, JSON logs at info,
+`PPROF_ENABLED=false`), so a container that ships no file and sets only what it
+needs is already sane. `.env.example` is what opts *local development* into the
+convenient values (development env, optional Redis, debug text logs,
+migrate-on-boot).
 
 There is deliberately **one vocabulary**. An earlier revision had a `config.yaml`
 of dotted keys that production never read — every knob had two spellings and the
@@ -258,11 +274,21 @@ prepared-statement cache breaks there.
 
 - **Postgres is a hard dependency**: unreachable at startup → the process
   exits (fail-fast, let the orchestrator restart it).
-- **Redis is a soft dependency**, controlled by `redis.mode`:
-  - `disabled` — no Redis at all, service runs uncached.
-  - `optional` (default) — log a warning and degrade to uncached reads
-    when unreachable; `/readyz` reports Redis as `degraded` but stays 200.
-  - `required` — unreachable Redis is fatal at startup.
+- **Redis is configurable**, controlled by `redis.mode`:
+  - `disabled` — no Redis and no Redis-backed features.
+  - `optional` — log a warning and run without Redis-backed features when
+    unreachable; `/readyz` reports Redis as `degraded` but stays 200.
+  - `required` (default) — unreachable Redis is fatal at startup.
+- **Production rate limiting requires a shared counter.** The limiter is on by
+  default, so `SERVICE_ENV=production` with `REDIS_MODE=optional` or `disabled`
+  fails boot unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true` explicitly accepts one
+  budget per replica. This is a multiplication of the limit, not a degraded
+  mode.
+- **Production rejects boot-time migrations.** `POSTGRES_MIGRATE=true` with
+  `SERVICE_ENV=production` fails boot; CI or a dedicated job owns migrations.
+- **Redis TLS is verifiable.** Managed Redis normally requires TLS; skipping
+  certificate verification is available for a self-signed development endpoint
+  and is rejected in production.
 
 ## Observability
 
@@ -346,7 +372,9 @@ series — error ratio, p99, pool utilisation, liveness, plus a
 `PostgresPoolStarved` leading indicator. Prometheus loads it from the compose
 stack. Recording rules exist so a dashboard panel and its alert evaluate the
 *same* expression; validate edits with
-`promtool check rules deploy/rules.yml`.
+`promtool check rules deploy/rules.yml` (CI does this on every change). Every
+alert links to [docs/runbook.md](docs/runbook.md), and the starting targets are
+in [docs/slo.md](docs/slo.md).
 
 **Adding a metric of your own:** build the instrument once in the service
 constructor (never per request), keep the attribute set bounded — an id, email
@@ -368,6 +396,7 @@ the orchestrator to kill the process mid-drain. A second signal exits at once.
 make test               # unit tests: go test -race ./... (fast, no Docker)
 make test-integration   # integration suite (-tags integration, needs Docker)
 make lint               # pinned in the Makefile and CI
+make gosec              # gosec, pinned in the Makefile and CI
 make sqlc               # regenerate internal/repository after editing db/queries/
 make vuln               # govulncheck at the pinned version
 make migrate-new name=x # scaffold a goose migration in db/migrations/
@@ -376,7 +405,7 @@ make build              # local binary with version/commit stamped in
 make docker-build       # distroless production image, provenance included
 ```
 
-Tool versions (goose, sqlc, govulncheck, golangci-lint) are pinned as Makefile
+Tool versions (goose, sqlc, govulncheck, golangci-lint, gosec) are pinned as Makefile
 variables so local runs and CI can't drift. They stay out of `go.mod` on purpose:
 sqlc's dependency tree would otherwise be downloaded by the Dockerfile's
 `go mod download` on every image build.
@@ -385,16 +414,19 @@ The integration suite spins a throwaway `postgres:16-alpine` via
 [testcontainers](https://github.com/testcontainers/testcontainers-go), applies
 the goose migrations (guarding them too), and exercises the repository. See
 `internal/repository/integration_test.go` — it is the template for new
-resources.
+resources. The alert rules are validated with `promtool` in CI; run the same
+check locally with
+`docker run --rm --entrypoint promtool -v "$PWD/deploy:/deploy:ro" prom/prometheus:v3.14.0 check rules /deploy/rules.yml`.
 
 ### Migrations
 
 Schema changes are goose SQL files under `db/migrations/` (`-- +goose Up` /
 `-- +goose Down` in one file), embedded in the binary and applied at boot when
-`postgres.migrate` is true. It is **off by default** so production replicas
-never race each other on rollout; `.env.example` turns it on for local dev.
-sqlc reads the same migration files as its schema, so nothing is kept in sync
-by hand.
+`postgres.migrate` is true. It is **off by default**, and config validation
+**rejects it when `SERVICE_ENV=production`**: replicas racing to migrate on
+rollout is not something to opt into by accident. `.env.example` turns it on for
+local dev. sqlc reads the same migration files as its schema, so nothing is kept
+in sync by hand.
 
 ## Extending
 

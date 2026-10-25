@@ -3,9 +3,11 @@
 package user
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
@@ -51,6 +53,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetAttributes(attribute.Int64("user.id", u.ID))
+	w.Header().Set("Location", strings.TrimRight(r.URL.Path, "/")+fmt.Sprintf("/%d", u.ID))
 	handler.OK(w, http.StatusCreated, createToDetailResponse(u))
 }
 
@@ -67,7 +70,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.Int64("user.id", id))
 
-	u, err := h.svc.Get(ctx, id)
+	u, err := h.svc.Get(ctx, usersvc.GetInput{ID: id})
 	if err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
@@ -90,7 +93,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("query.offset", int(page.Offset)),
 	)
 
-	users, err := h.svc.List(ctx, page.Limit, page.Offset)
+	users, err := h.svc.List(ctx, usersvc.ListInput{Limit: page.Limit, Offset: page.Offset})
 	if err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
@@ -123,7 +126,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := h.svc.Update(ctx, id, usersvc.UpdateInput{Name: req.Name, Email: req.Email})
+	u, err := h.svc.Update(ctx, usersvc.UpdateInput{ID: id, Name: req.Name, Email: req.Email})
 	if err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
@@ -146,7 +149,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.Int64("user.id", id))
 
-	if err := h.svc.Delete(ctx, id); err != nil {
+	if err := h.svc.Delete(ctx, usersvc.DeleteInput{ID: id}); err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
 	}

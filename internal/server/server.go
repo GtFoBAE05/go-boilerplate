@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
+	"strings"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/config"
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
@@ -17,7 +19,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
-	"github.com/jackc/pgx/v5/pgxpool"
 	goredis "github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -60,6 +61,7 @@ func rateLimitOptions(client *goredis.Client, prefix string, log *slog.Logger) [
 		httprate.WithLimitCounter(ratelimit.RedisCounter(client, prefix)),
 		httprate.WithErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
 			log.ErrorContext(r.Context(), "distributed rate limit failed closed", "prefix", prefix, "error", err)
+			w.Header().Set("Retry-After", "1")
 			handler.WriteError(w, http.StatusServiceUnavailable, handler.CodeRateLimitUnavailable,
 				"rate limiting is temporarily unavailable")
 		}),
@@ -69,6 +71,10 @@ func rateLimitOptions(client *goredis.Client, prefix string, log *slog.Logger) [
 // redisPinger adapts *goredis.Client to health.Pinger.
 type redisPinger struct{ rdb *goredis.Client }
 
+type pingerFunc func(context.Context) error
+
+func (f pingerFunc) Ping(ctx context.Context) error { return f(ctx) }
+
 func (p redisPinger) Ping(ctx context.Context) error { return p.rdb.Ping(ctx).Err() }
 
 // Deps carries everything the router needs. Adding a resource adds a field
@@ -77,19 +83,57 @@ type Deps struct {
 	Users usersvc.UserService
 
 	// Infrastructure handles for health checks. Redis may be nil when
-	// disabled or unreachable in optional mode.
-	Pool  *pgxpool.Pool
-	Redis *goredis.Client
+	// disabled or unreachable in optional mode. Postgres is an interface, not
+	// *pgxpool.Pool, so a test can supply a fake and so a typed-nil pool is
+	// detectable instead of becoming a non-nil Pinger.
+	Postgres health.Pinger
+	Redis    *goredis.Client
 	// RedisRequired makes a failing Redis ping fail /readyz. The caller
 	// derives it from redis.mode; the server never reads config for it.
 	RedisRequired bool
+	// RedisUnavailable is set when redis.mode=optional and the startup ping
+	// failed. Redis is nil in that case, so this carries the reason /readyz
+	// reports "degraded" instead of omitting the dependency entirely.
+	RedisUnavailable error
 }
 
-// New assembles the router — middleware chain, probes, /metrics, and every
-// /api/v1 resource — into a ready-to-start Server.
-func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
+// isNil catches both a nil interface and the typed-nil pointer assigned to it.
+// The latter is the classic Go footgun: a nil *pgxpool.Pool stored in a
+// health.Pinger is not == nil, so /readyz would panic on the first ping.
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+// New assembles the router — middleware chain, probes, and every /api/v1
+// resource — into a ready-to-start Server.
+func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("server: config is required")
+	}
+	if log == nil {
+		return nil, fmt.Errorf("server: logger is required")
+	}
+	if isNil(deps.Postgres) {
+		return nil, fmt.Errorf("server: postgres dependency is required")
+	}
+	if isNil(deps.Users) {
+		return nil, fmt.Errorf("server: users service is required")
+	}
+
 	r := chi.NewRouter()
 
+	// Validate the request ID before chi adopts it. An unbounded, arbitrary
+	// header would otherwise land in every log line and trace.
+	r.Use(sanitizeRequestID)
 	r.Use(chimw.RequestID)
 	// No RealIP middleware on purpose: it trusts X-Forwarded-For / X-Real-IP
 	// unconditionally, letting any client spoof its address (and evade the
@@ -99,19 +143,24 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 	r.Use(requestLogger(log))
 	r.Use(recoverPanics(log))
 	// Per-request deadline: downstream ctx-aware calls (pgx, redis) abort
-	// when it fires and the client gets a 504.
-	r.Use(chimw.Timeout(cfg.Server.RequestTimeout))
+	// when it fires. The middleware only cancels the context and writes a
+	// fallback 504 if the handler wrote nothing; WriteServiceError writes the
+	// envelope when the handler notices first.
+	r.Use(requestTimeout(cfg.Server.RequestTimeout))
 
 	// Unknown routes and wrong methods use the same error envelope as the
 	// API. Registered before Mount so sub-routers inherit both handlers.
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		handler.WriteError(w, http.StatusNotFound, handler.CodeNotFound, "route not found")
 	})
-	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+		if allow := allowedMethods(req, r); allow != "" {
+			w.Header().Set("Allow", allow)
+		}
 		handler.WriteError(w, http.StatusMethodNotAllowed, handler.CodeMethodNotAllowed, "method not allowed")
 	})
 
-	required := map[string]health.Pinger{"postgres": deps.Pool}
+	required := map[string]health.Pinger{"postgres": deps.Postgres}
 	optional := map[string]health.Pinger{}
 	if deps.Redis != nil {
 		if deps.RedisRequired {
@@ -119,6 +168,10 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 		} else {
 			optional["redis"] = redisPinger{rdb: deps.Redis}
 		}
+	} else if deps.RedisUnavailable != nil {
+		optional["redis"] = pingerFunc(func(context.Context) error {
+			return deps.RedisUnavailable
+		})
 	}
 	healthHandler := health.NewHandler(required, optional, log)
 	r.Get("/healthz", healthHandler.Liveness)
@@ -137,6 +190,11 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 			// (GHSA-9g5q-2w5x-hmxf).
 			options := []httprate.Option{
 				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
+					retry := int(cfg.RateLimit.Window.Seconds())
+					if retry < 1 {
+						retry = 1
+					}
+					w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
 					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
 				}),
 			}
@@ -172,7 +230,23 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 		},
 		log:    log,
 		health: healthHandler,
+	}, nil
+}
+
+// allowedMethods asks chi which methods match the path. It runs only on a 405,
+// so the extra tree walk is irrelevant; the alternative is an Allow header that
+// hard-codes this template's routes and silently rots.
+func allowedMethods(r *http.Request, router chi.Routes) string {
+	var allowed []string
+	for _, method := range []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions,
+	} {
+		if router.Match(chi.NewRouteContext(), method, r.URL.Path) {
+			allowed = append(allowed, method)
+		}
 	}
+	return strings.Join(allowed, ", ")
 }
 
 // BeginDrain flips /readyz to 503 while continuing to serve traffic, so an

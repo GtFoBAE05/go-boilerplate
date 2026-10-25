@@ -2,9 +2,9 @@ package user
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
@@ -56,39 +56,6 @@ func (f *fakeStore) ExecTx(_ context.Context, fn func(repository.Querier) error)
 	return fn(f)
 }
 
-type fakeCache struct {
-	store map[string][]byte
-	sets  int
-}
-
-func (f *fakeCache) Get(_ context.Context, key string, dst any) (bool, error) {
-	data, ok := f.store[key]
-	if !ok {
-		return false, nil
-	}
-	if err := json.Unmarshal(data, dst); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (f *fakeCache) Set(_ context.Context, key string, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	f.sets++
-	f.store[key] = data
-	return nil
-}
-
-func (f *fakeCache) Delete(_ context.Context, keys ...string) error {
-	for _, k := range keys {
-		delete(f.store, k)
-	}
-	return nil
-}
-
 func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
@@ -99,49 +66,70 @@ func TestGetMapsNoRowsToErrNotFound(t *testing.T) {
 			return repository.User{}, pgx.ErrNoRows
 		},
 	}
-	svc := NewUserService(repo, nil, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
-	_, err := svc.Get(context.Background(), 42)
+	_, err := svc.Get(context.Background(), GetInput{ID: 42})
 	if !errors.Is(err, service.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
-	}
-}
-
-func TestGetPopulatesCacheOnMiss(t *testing.T) {
-	repo := &fakeStore{
-		getUser: func(_ context.Context, id int64) (repository.User, error) {
-			return repository.User{ID: id, Name: "alice", Email: "a@example.com"}, nil
-		},
-	}
-	c := &fakeCache{store: map[string][]byte{}}
-	svc := NewUserService(repo, c, discardLogger())
-
-	user, err := svc.Get(context.Background(), 7)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if user.ID != 7 {
-		t.Fatalf("want user ID 7, got %d", user.ID)
-	}
-	if c.sets != 1 {
-		t.Fatalf("want 1 cache set, got %d", c.sets)
-	}
-	if _, ok := c.store["user:7"]; !ok {
-		t.Fatal("expected user:7 cached")
 	}
 }
 
 func TestCreateMapsUniqueViolationToEmailTaken(t *testing.T) {
 	repo := &fakeStore{
 		createUser: func(context.Context, repository.CreateUserParams) (repository.User, error) {
-			return repository.User{}, &pgconn.PgError{Code: "23505"}
+			return repository.User{}, &pgconn.PgError{
+				Code: "23505", ConstraintName: "users_email_lower_key",
+			}
 		},
 	}
-	svc := NewUserService(repo, nil, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
 	_, err := svc.Create(context.Background(), CreateInput{Name: "alice", Email: "a@example.com"})
 	if !errors.Is(err, ErrEmailTaken) {
 		t.Fatalf("want ErrEmailTaken, got %v", err)
+	}
+}
+
+func TestCreateNormalizesBeforeWriting(t *testing.T) {
+	var got repository.CreateUserParams
+	repo := &fakeStore{
+		createUser: func(_ context.Context, arg repository.CreateUserParams) (repository.User, error) {
+			got = arg
+			return repository.User{ID: 1, Name: arg.Name, Email: arg.Email}, nil
+		},
+	}
+	svc := NewUserService(repo, discardLogger())
+
+	if _, err := svc.Create(context.Background(), CreateInput{
+		Name: "  Alice  ", Email: "  ALICE@Example.COM ",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Name != "Alice" || got.Email != "alice@example.com" {
+		t.Fatalf("service must normalize before writing, got %+v", got)
+	}
+}
+
+func TestCreateRejectsInvalidInputBeforeStore(t *testing.T) {
+	calls := 0
+	repo := &fakeStore{
+		createUser: func(context.Context, repository.CreateUserParams) (repository.User, error) {
+			calls++
+			return repository.User{}, nil
+		},
+	}
+	svc := NewUserService(repo, discardLogger())
+
+	_, err := svc.Create(context.Background(), CreateInput{Name: " ", Email: "not-an-email"})
+	if err == nil {
+		t.Fatal("want validation error, got nil")
+	}
+	var domainErr *service.Error
+	if !errors.As(err, &domainErr) || domainErr.Kind != service.KindInvalid {
+		t.Fatalf("want KindInvalid, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("store called %d times for invalid input", calls)
 	}
 }
 
@@ -151,41 +139,17 @@ func TestUpdateMapsUniqueViolationToEmailTaken(t *testing.T) {
 			return repository.User{ID: id, Name: "alice", Email: "a@example.com"}, nil
 		},
 		updateUser: func(context.Context, repository.UpdateUserParams) (repository.User, error) {
-			return repository.User{}, &pgconn.PgError{Code: "23505"}
+			return repository.User{}, &pgconn.PgError{
+				Code: "23505", ConstraintName: "users_email_lower_key",
+			}
 		},
 	}
-	svc := NewUserService(repo, nil, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
 	email := "b@example.com"
-	_, err := svc.Update(context.Background(), 7, UpdateInput{Email: &email})
+	_, err := svc.Update(context.Background(), UpdateInput{ID: 7, Email: &email})
 	if !errors.Is(err, ErrEmailTaken) {
 		t.Fatalf("want ErrEmailTaken, got %v", err)
-	}
-}
-
-func TestGetServesCacheHitWithoutQuerying(t *testing.T) {
-	data, err := json.Marshal(UserCache{ID: 7, Name: "alice", Email: "a@example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	queries := 0
-	repo := &fakeStore{
-		getUser: func(context.Context, int64) (repository.User, error) {
-			queries++
-			return repository.User{}, errors.New("unexpected database query")
-		},
-	}
-	svc := NewUserService(repo, &fakeCache{store: map[string][]byte{"user:7": data}}, discardLogger())
-
-	got, err := svc.Get(context.Background(), 7)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.ID != 7 || got.Name != "alice" || got.Email != "a@example.com" {
-		t.Fatalf("unexpected cached user: %+v", got)
-	}
-	if queries != 0 {
-		t.Fatalf("store queried %d times on cache hit", queries)
 	}
 }
 
@@ -196,15 +160,15 @@ func TestListPropagatesStoreError(t *testing.T) {
 			return nil, storeErr
 		},
 	}
-	svc := NewUserService(repo, nil, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
-	_, err := svc.List(context.Background(), 10, 0)
+	_, err := svc.List(context.Background(), ListInput{Limit: 10})
 	if err == storeErr || !errors.Is(err, storeErr) {
 		t.Fatalf("want wrapped store error, got %v", err)
 	}
 }
 
-func TestUpdateMergesPartialInputAndInvalidatesCache(t *testing.T) {
+func TestUpdateMergesPartialInput(t *testing.T) {
 	repo := &fakeStore{
 		getUserForUpdate: func(_ context.Context, id int64) (repository.User, error) {
 			return repository.User{ID: id, Name: "alice", Email: "a@example.com"}, nil
@@ -213,11 +177,10 @@ func TestUpdateMergesPartialInputAndInvalidatesCache(t *testing.T) {
 			return repository.User{ID: arg.ID, Name: arg.Name, Email: arg.Email}, nil
 		},
 	}
-	c := &fakeCache{store: map[string][]byte{"user:7": []byte("stale")}}
-	svc := NewUserService(repo, c, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
-	name := "bob"
-	user, err := svc.Update(context.Background(), 7, UpdateInput{Name: &name})
+	name := "  bob  "
+	user, err := svc.Update(context.Background(), UpdateInput{ID: 7, Name: &name})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -227,8 +190,46 @@ func TestUpdateMergesPartialInputAndInvalidatesCache(t *testing.T) {
 	if user.Email != "a@example.com" {
 		t.Fatalf("want email kept from current row, got %q", user.Email)
 	}
-	if _, ok := c.store["user:7"]; ok {
-		t.Fatal("expected user:7 invalidated after update")
+}
+
+func TestUpdateRejectsEmptyInputBeforeTransaction(t *testing.T) {
+	calls := 0
+	repo := &fakeStore{
+		getUserForUpdate: func(context.Context, int64) (repository.User, error) {
+			calls++
+			return repository.User{}, nil
+		},
+	}
+	svc := NewUserService(repo, discardLogger())
+
+	_, err := svc.Update(context.Background(), UpdateInput{ID: 7})
+	if err == nil {
+		t.Fatal("want validation error, got nil")
+	}
+	if calls != 0 {
+		t.Fatalf("store called %d times for empty update", calls)
+	}
+}
+
+func TestUpdateNormalizesEmail(t *testing.T) {
+	var got repository.UpdateUserParams
+	repo := &fakeStore{
+		getUserForUpdate: func(_ context.Context, id int64) (repository.User, error) {
+			return repository.User{ID: id, Name: "alice", Email: "a@example.com"}, nil
+		},
+		updateUser: func(_ context.Context, arg repository.UpdateUserParams) (repository.User, error) {
+			got = arg
+			return repository.User{ID: arg.ID, Name: arg.Name, Email: arg.Email}, nil
+		},
+	}
+	svc := NewUserService(repo, discardLogger())
+
+	email := "  NEW@Example.COM "
+	if _, err := svc.Update(context.Background(), UpdateInput{ID: 7, Email: &email}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Email != "new@example.com" {
+		t.Fatalf("want normalized email, got %q", got.Email)
 	}
 }
 
@@ -238,27 +239,11 @@ func TestDeleteMissingRowReturnsErrNotFound(t *testing.T) {
 	repo := &fakeStore{
 		deleteUser: func(context.Context, int64) (int64, error) { return 0, nil },
 	}
-	c := &fakeCache{store: map[string][]byte{}}
-	svc := NewUserService(repo, c, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
-	err := svc.Delete(context.Background(), 42)
+	err := svc.Delete(context.Background(), DeleteInput{ID: 42})
 	if !errors.Is(err, service.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
-	}
-}
-
-func TestDeleteInvalidatesCache(t *testing.T) {
-	repo := &fakeStore{
-		deleteUser: func(context.Context, int64) (int64, error) { return 1, nil },
-	}
-	c := &fakeCache{store: map[string][]byte{"user:7": []byte("stale")}}
-	svc := NewUserService(repo, c, discardLogger())
-
-	if err := svc.Delete(context.Background(), 7); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok := c.store["user:7"]; ok {
-		t.Fatal("expected user:7 invalidated after delete")
 	}
 }
 
@@ -268,11 +253,26 @@ func TestUpdateNotFound(t *testing.T) {
 			return repository.User{}, pgx.ErrNoRows
 		},
 	}
-	svc := NewUserService(repo, nil, discardLogger())
+	svc := NewUserService(repo, discardLogger())
 
 	name := "bob"
-	_, err := svc.Update(context.Background(), 42, UpdateInput{Name: &name})
+	_, err := svc.Update(context.Background(), UpdateInput{ID: 42, Name: &name})
 	if !errors.Is(err, service.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestValidationErrorMentionsField(t *testing.T) {
+	err := CreateInput{Name: "alice", Email: "not-an-email"}.Validate()
+	if err == nil {
+		t.Fatal("want validation error, got nil")
+	}
+	var domainErr *service.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("want *service.Error, got %T", err)
+	}
+	fields, ok := domainErr.Details.(map[string]string)
+	if !ok || !strings.Contains(fields["email"], "valid email") {
+		t.Fatalf("want email field error, got %#v", domainErr.Details)
 	}
 }

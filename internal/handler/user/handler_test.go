@@ -17,10 +17,10 @@ import (
 // mockUserService implements usersvc.UserService via configurable funcs.
 type mockUserService struct {
 	create func(ctx context.Context, in usersvc.CreateInput) (usersvc.CreateOutput, error)
-	get    func(ctx context.Context, id int64) (usersvc.GetOutput, error)
-	list   func(ctx context.Context, limit, offset int32) ([]usersvc.ListOutput, error)
-	update func(ctx context.Context, id int64, in usersvc.UpdateInput) (usersvc.UpdateOutput, error)
-	del    func(ctx context.Context, id int64) error
+	get    func(ctx context.Context, in usersvc.GetInput) (usersvc.GetOutput, error)
+	list   func(ctx context.Context, in usersvc.ListInput) ([]usersvc.ListOutput, error)
+	update func(ctx context.Context, in usersvc.UpdateInput) (usersvc.UpdateOutput, error)
+	del    func(ctx context.Context, in usersvc.DeleteInput) error
 }
 
 var _ usersvc.UserService = (*mockUserService)(nil)
@@ -29,20 +29,20 @@ func (m *mockUserService) Create(ctx context.Context, in usersvc.CreateInput) (u
 	return m.create(ctx, in)
 }
 
-func (m *mockUserService) Get(ctx context.Context, id int64) (usersvc.GetOutput, error) {
-	return m.get(ctx, id)
+func (m *mockUserService) Get(ctx context.Context, in usersvc.GetInput) (usersvc.GetOutput, error) {
+	return m.get(ctx, in)
 }
 
-func (m *mockUserService) List(ctx context.Context, limit, offset int32) ([]usersvc.ListOutput, error) {
-	return m.list(ctx, limit, offset)
+func (m *mockUserService) List(ctx context.Context, in usersvc.ListInput) ([]usersvc.ListOutput, error) {
+	return m.list(ctx, in)
 }
 
-func (m *mockUserService) Update(ctx context.Context, id int64, in usersvc.UpdateInput) (usersvc.UpdateOutput, error) {
-	return m.update(ctx, id, in)
+func (m *mockUserService) Update(ctx context.Context, in usersvc.UpdateInput) (usersvc.UpdateOutput, error) {
+	return m.update(ctx, in)
 }
 
-func (m *mockUserService) Delete(ctx context.Context, id int64) error {
-	return m.del(ctx, id)
+func (m *mockUserService) Delete(ctx context.Context, in usersvc.DeleteInput) error {
+	return m.del(ctx, in)
 }
 
 func TestCreateValidation(t *testing.T) {
@@ -53,6 +53,7 @@ func TestCreateValidation(t *testing.T) {
 		wantField  string
 	}{
 		{"invalid json", "{", http.StatusBadRequest, ""},
+		{"duplicate key", `{"name":"alice","email":"a@b.co","email":"b@c.co"}`, http.StatusBadRequest, ""},
 		{"trailing json value", `{"name":"a","email":"a@b.co"}{"name":"b"}`, http.StatusBadRequest, ""},
 		{"unknown field", `{"name":"alice","email":"a@b.co","emial":"typo"}`, http.StatusBadRequest, ""},
 		{"missing name", `{"email":"a@b.co"}`, http.StatusUnprocessableEntity, "name"},
@@ -182,11 +183,14 @@ func TestCreateSuccess(t *testing.T) {
 	if resp.Data.ID != 1 || resp.Data.Name != "alice" {
 		t.Fatalf("unexpected response: %+v", resp.Data)
 	}
+	if got := rec.Header().Get("Location"); got != "/1" {
+		t.Fatalf("want Location /1, got %q", got)
+	}
 }
 
 func TestGetNotFoundMapsTo404(t *testing.T) {
 	svc := &mockUserService{
-		get: func(context.Context, int64) (usersvc.GetOutput, error) {
+		get: func(context.Context, usersvc.GetInput) (usersvc.GetOutput, error) {
 			return usersvc.GetOutput{}, service.ErrNotFound
 		},
 	}
@@ -231,6 +235,29 @@ func TestCreateEmailTakenMapsTo409(t *testing.T) {
 	}
 }
 
+func TestCreateLowercasesEmailBeforeService(t *testing.T) {
+	var gotIn usersvc.CreateInput
+	svc := &mockUserService{
+		create: func(_ context.Context, in usersvc.CreateInput) (usersvc.CreateOutput, error) {
+			gotIn = in
+			return usersvc.CreateOutput{ID: 1, Name: in.Name, Email: in.Email}, nil
+		},
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+
+	body := `{"name":"alice","email":" ALICE@Example.COM "}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if gotIn.Email != "alice@example.com" {
+		t.Fatalf("service must receive a lowercased email, got %q", gotIn.Email)
+	}
+}
+
 func TestCreateTrimsBeforeService(t *testing.T) {
 	var gotIn usersvc.CreateInput
 	svc := &mockUserService{
@@ -271,9 +298,9 @@ func TestUpdateWhitespaceOnlyNameRejected(t *testing.T) {
 func TestUpdatePartialBody(t *testing.T) {
 	var gotIn usersvc.UpdateInput
 	svc := &mockUserService{
-		update: func(_ context.Context, id int64, in usersvc.UpdateInput) (usersvc.UpdateOutput, error) {
+		update: func(_ context.Context, in usersvc.UpdateInput) (usersvc.UpdateOutput, error) {
 			gotIn = in
-			return usersvc.UpdateOutput{ID: id, Name: *in.Name, Email: "kept@example.com"}, nil
+			return usersvc.UpdateOutput{ID: in.ID, Name: *in.Name, Email: "kept@example.com"}, nil
 		},
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
@@ -297,7 +324,7 @@ func TestUpdatePartialBody(t *testing.T) {
 // silent 204.
 func TestDeleteNotFoundMapsTo404(t *testing.T) {
 	svc := &mockUserService{
-		del: func(context.Context, int64) error { return service.ErrNotFound },
+		del: func(context.Context, usersvc.DeleteInput) error { return service.ErrNotFound },
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 
@@ -312,7 +339,7 @@ func TestDeleteNotFoundMapsTo404(t *testing.T) {
 
 func TestDeleteSuccessReturns204(t *testing.T) {
 	svc := &mockUserService{
-		del: func(context.Context, int64) error { return nil },
+		del: func(context.Context, usersvc.DeleteInput) error { return nil },
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 
@@ -343,8 +370,8 @@ func TestListRejectsBadPagination(t *testing.T) {
 func TestListPassesPaginationThrough(t *testing.T) {
 	var gotLimit, gotOffset int32
 	svc := &mockUserService{
-		list: func(_ context.Context, limit, offset int32) ([]usersvc.ListOutput, error) {
-			gotLimit, gotOffset = limit, offset
+		list: func(_ context.Context, in usersvc.ListInput) ([]usersvc.ListOutput, error) {
+			gotLimit, gotOffset = in.Limit, in.Offset
 			return nil, nil
 		},
 	}

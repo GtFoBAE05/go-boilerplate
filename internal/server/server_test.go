@@ -3,16 +3,21 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/config"
-	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 	goredis "github.com/redis/go-redis/v9"
 
 	"go.opentelemetry.io/otel"
@@ -29,9 +34,13 @@ import (
 // empty so allowed requests succeed and we can observe the 429 on overflow.
 type stubUserService struct{ usersvc.UserService }
 
-func (stubUserService) List(context.Context, int32, int32) ([]usersvc.ListOutput, error) {
+func (stubUserService) List(context.Context, usersvc.ListInput) ([]usersvc.ListOutput, error) {
 	return nil, nil
 }
+
+type stubPinger struct{}
+
+func (stubPinger) Ping(context.Context) error { return nil }
 
 // newTestServer builds the real router allowing 1 request per window, so the
 // second request is throttled.
@@ -43,11 +52,19 @@ func newTestServer(t *testing.T) http.Handler {
 func newTestServerWith(t *testing.T) *Server {
 	t.Helper()
 	cfg := &config.Config{
-		Server:    platformconfig.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
-		Redis:     platformconfig.RedisConfig{Mode: platformconfig.RedisModeDisabled},
-		RateLimit: platformconfig.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
+		Server: config.ServerConfig{
+			Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+			RequestTimeout: 20 * time.Second,
+		},
+		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
+		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
 	}
-	return New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}})
+	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}, Postgres: stubPinger{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv
 }
 
 // The header deadline is the slowloris guard; MaxHeaderBytes keeps a single
@@ -87,6 +104,139 @@ func TestRateLimitOptionsWithRedis(t *testing.T) {
 	}
 }
 
+func TestNewRejectsMissingOrTypedNilDependencies(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
+		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
+		RateLimit: config.RateLimitConfig{Enabled: false},
+	}
+	log := slog.New(slog.DiscardHandler)
+
+	if _, err := New(cfg, log, Deps{Postgres: stubPinger{}}); err == nil {
+		t.Fatal("want an error when Users is nil")
+	}
+	var nilPool *pgxpool.Pool
+	if _, err := New(cfg, log, Deps{Users: stubUserService{}, Postgres: nilPool}); err == nil {
+		t.Fatal("want an error for a typed-nil Postgres pinger")
+	}
+}
+
+func TestMethodNotAllowedSetsAllow(t *testing.T) {
+	h := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/1", nil)
+	req.RemoteAddr = "203.0.113.9:1234"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("want 405, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	allow := rec.Header().Get("Allow")
+	for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
+		if !strings.Contains(allow, method) {
+			t.Fatalf("Allow %q missing %s", allow, method)
+		}
+	}
+}
+
+// The custom timeout middleware must write exactly one response, whether the
+// handler notices the deadline (WriteServiceError) or not (fallback).
+func TestRequestTimeoutWritesOneEnvelope(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "handler writes",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+				handler.WriteServiceError(w, r, slog.New(slog.DiscardHandler), r.Context().Err())
+			},
+		},
+		{
+			name: "handler returns silently",
+			handler: func(_ http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := chi.NewRouter()
+			router.Use(requestTimeout(10 * time.Millisecond))
+			router.Get("/slow", tt.handler)
+
+			cw := &countingWriter{ResponseWriter: httptest.NewRecorder()}
+			router.ServeHTTP(cw, httptest.NewRequest(http.MethodGet, "/slow", nil))
+
+			if cw.headerWrites != 1 {
+				t.Fatalf("want exactly one WriteHeader call, got %d", cw.headerWrites)
+			}
+			rec := cw.ResponseWriter.(*httptest.ResponseRecorder)
+			if rec.Code != http.StatusGatewayTimeout {
+				t.Fatalf("want 504, got %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("timeout body is not JSON: %v", err)
+			}
+			if resp.Error.Code != handler.CodeTimeout {
+				t.Fatalf("want code %s, got %q", handler.CodeTimeout, resp.Error.Code)
+			}
+		})
+	}
+}
+
+type countingWriter struct {
+	http.ResponseWriter
+	headerWrites int
+}
+
+func (c *countingWriter) WriteHeader(status int) {
+	c.headerWrites++
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func TestSanitizeRequestID(t *testing.T) {
+	router := chi.NewRouter()
+	router.Use(sanitizeRequestID)
+	router.Use(chimw.RequestID)
+	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(chimw.GetReqID(r.Context())))
+	})
+
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"valid", "abc-123", "abc-123"},
+		{"too long", strings.Repeat("a", 65), ""},
+		{"bad characters", "abc 123", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("X-Request-Id", tt.header)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			got := rec.Body.String()
+			if tt.want != "" && got != tt.want {
+				t.Fatalf("want request id %q, got %q", tt.want, got)
+			}
+			if tt.want == "" && got == tt.header {
+				t.Fatalf("invalid request id %q was adopted", tt.header)
+			}
+		})
+	}
+}
+
 func TestRateLimitEnvelope(t *testing.T) {
 	h := newTestServer(t)
 
@@ -121,6 +271,9 @@ func TestRateLimitEnvelope(t *testing.T) {
 	}
 	if resp.Error.Message == "" {
 		t.Fatalf("want non-empty message")
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("want Retry-After 1, got %q", got)
 	}
 }
 
@@ -285,6 +438,38 @@ func TestPprofServerDisabledReturnsNil(t *testing.T) {
 
 // Draining must fail readiness while liveness keeps reporting 200: a liveness
 // failure tells the orchestrator to kill the process mid-drain.
+func TestReadinessReportsOptionalRedisUnavailable(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
+		Redis:     config.RedisConfig{Mode: config.RedisModeOptional},
+		RateLimit: config.RateLimitConfig{Enabled: false},
+	}
+	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{
+		Users:            stubUserService{},
+		Postgres:         stubPinger{},
+		RedisUnavailable: errors.New("redis down"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("optional Redis must not fail readiness, got %d", rec.Code)
+	}
+	var body struct {
+		Checks map[string]string `json:"checks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode readiness: %v", err)
+	}
+	if body.Checks["redis"] != "degraded" {
+		t.Fatalf("want redis degraded, got %#v", body.Checks)
+	}
+}
+
 func TestBeginDrainFailsReadinessButNotLiveness(t *testing.T) {
 	srv := newTestServerWith(t)
 	h := srv.http.Handler

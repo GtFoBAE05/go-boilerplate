@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -45,12 +47,66 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 				"bytes", ww.BytesWritten(),
 				"duration_ms", float64(time.Since(start).Microseconds()) / 1000,
 				"request_id", middleware.GetReqID(r.Context()),
-				"remote_addr", r.RemoteAddr,
+			}
+			// RemoteAddr is PII and has no place in the default info log. It
+			// is still available at debug when someone is actually debugging.
+			if log.Enabled(r.Context(), slog.LevelDebug) {
+				attrs = append(attrs, "remote_addr", r.RemoteAddr)
 			}
 
 			log.LogAttrs(r.Context(), levelFor(ww.Status()), "http request", toAttrs(attrs)...)
 		})
 	}
+}
+
+// requestTimeout cancels the request context after d. It deliberately does not
+// write a response itself on every path: chi's Timeout middleware writes a bare
+// 504, and WriteServiceError writes the JSON envelope when the handler notices
+// the deadline - two writers on one response. Here the fallback is written only
+// when the handler wrote nothing at all.
+func requestTimeout(d time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), d)
+			defer cancel()
+
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r.WithContext(ctx))
+
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && ww.Status() == 0 {
+				handler.WriteError(ww, http.StatusGatewayTimeout, handler.CodeTimeout, "request timed out")
+			}
+		})
+	}
+}
+
+// sanitizeRequestID drops a client-supplied X-Request-Id unless it is short and
+// uses only characters safe to copy into logs and trace attributes. chi then
+// generates its own ID, so every request still has one.
+func sanitizeRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get("X-Request-Id"); id != "" && !validRequestID(id) {
+			r.Header.Del("X-Request-Id")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func validRequestID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func levelFor(status int) slog.Level {
