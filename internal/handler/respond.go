@@ -110,6 +110,8 @@ func OKList(w http.ResponseWriter, data any, meta Meta) {
 // invariant worth keeping literally true, or the one hand-written status is
 // where a future envelope change quietly stops applying.
 func NoContent(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -133,6 +133,7 @@ func toAttrs(kv []any) []slog.Attr {
 func recoverPanics(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			defer func() {
 				if rec := recover(); rec != nil {
 					// net/http uses this sentinel to abort a response;
@@ -143,11 +144,19 @@ func recoverPanics(log *slog.Logger) func(http.Handler) http.Handler {
 					log.ErrorContext(r.Context(), "panic recovered",
 						"panic", rec,
 						"stack", string(debug.Stack()),
+						"response_started", ww.Status() != 0,
 					)
-					handler.WriteError(w, http.StatusInternalServerError, handler.CodeInternal, "internal server error")
+					// Once the handler has committed a status, an error
+					// envelope cannot replace the response: the header is
+					// already on the wire. Abort the connection instead of
+					// appending JSON to a truncated success body.
+					if ww.Status() != 0 {
+						panic(http.ErrAbortHandler)
+					}
+					handler.WriteError(ww, http.StatusInternalServerError, handler.CodeInternal, "internal server error")
 				}
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(ww, r)
 		})
 	}
 }

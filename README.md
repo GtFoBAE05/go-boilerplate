@@ -175,7 +175,9 @@ Dependencies:
 
 - **Postgres** is required; an unreachable database at startup is fatal.
 - **Redis** is `disabled`, `optional`, or `required`. Optional Redis that is
-  unreachable reports `degraded` on `/readyz` but stays 200.
+  unreachable at startup reports `degraded` on `/readyz` and stays 200. If the
+  rate limiter is using Redis, a later Redis failure fails readiness (503)
+  because the limiter fails closed.
 - Production rate limiting needs a shared counter. Production with optional or
   disabled Redis fails boot unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true`.
 - Production migrations belong to the deploy pipeline, not the app. Redis TLS

@@ -194,6 +194,12 @@ func TestNoContentWritesNoBody(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Fatalf("want empty body, got %q", rec.Body.String())
 	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("want Cache-Control no-store, got %q", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("want X-Content-Type-Options nosniff, got %q", got)
+	}
 }
 
 func TestErrorResponsesDisableCaching(t *testing.T) {

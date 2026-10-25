@@ -89,7 +89,8 @@ type Deps struct {
 	Postgres health.Pinger
 	Redis    *goredis.Client
 	// RedisRequired makes a failing Redis ping fail /readyz. The caller
-	// derives it from redis.mode; the server never reads config for it.
+	// derives it from redis.mode; New also treats Redis as required when the
+	// rate limiter is using it, because the limiter fails closed.
 	RedisRequired bool
 	// RedisUnavailable is set when redis.mode=optional and the startup ping
 	// failed. Redis is nil in that case, so this carries the reason /readyz
@@ -162,8 +163,12 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 
 	required := map[string]health.Pinger{"postgres": deps.Postgres}
 	optional := map[string]health.Pinger{}
+	// The limiter fails closed when its Redis counter errors. If it is using
+	// Redis, readiness must fail too: reporting 200/degraded while every API
+	// request is a 503 would keep a broken replica in rotation.
+	redisRequiredForReadiness := deps.RedisRequired || (cfg.RateLimit.Enabled && deps.Redis != nil)
 	if deps.Redis != nil {
-		if deps.RedisRequired {
+		if redisRequiredForReadiness {
 			required["redis"] = redisPinger{rdb: deps.Redis}
 		} else {
 			optional["redis"] = redisPinger{rdb: deps.Redis}

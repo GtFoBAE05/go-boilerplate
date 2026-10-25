@@ -193,6 +193,129 @@ func TestRequestTimeoutWritesOneEnvelope(t *testing.T) {
 	}
 }
 
+func TestRecoverPanicsWritesEnvelopeWhenNothingWasWritten(t *testing.T) {
+	h := recoverPanics(slog.New(slog.DiscardHandler))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("panic response is not JSON: %v", err)
+	}
+	if resp.Error.Code != handler.CodeInternal {
+		t.Fatalf("want code %s, got %q", handler.CodeInternal, resp.Error.Code)
+	}
+}
+
+func TestRecoverPanicsAbortsAfterResponseStarted(t *testing.T) {
+	h := recoverPanics(slog.New(slog.DiscardHandler))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		panic("boom")
+	}))
+
+	defer func() {
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Fatalf("want http.ErrAbortHandler after a started response, got %v", got)
+		}
+	}()
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	t.Fatal("handler should have aborted the connection")
+}
+
+func unreachableRedis(t *testing.T) *goredis.Client {
+	t.Helper()
+	client := goredis.NewClient(&goredis.Options{
+		Addr:         "127.0.0.1:1",
+		DialTimeout:  10 * time.Millisecond,
+		ReadTimeout:  10 * time.Millisecond,
+		WriteTimeout: 10 * time.Millisecond,
+		MaxRetries:   -1,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// If the rate limiter uses Redis, a Redis outage must fail readiness too. The
+// limiter fails closed, so a 200/degraded probe would keep a replica that
+// answers every API request with 503 in rotation.
+func TestReadinessRequiresRedisWhenRateLimiterUsesIt(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
+		Redis:     config.RedisConfig{Mode: config.RedisModeOptional},
+		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
+	}
+	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{
+		Users:    stubUserService{},
+		Postgres: stubPinger{},
+		Redis:    unreachableRedis(t),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 when the limiter's Redis is down, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Checks map[string]string `json:"checks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode readiness: %v", err)
+	}
+	if body.Checks["redis"] != "down" {
+		t.Fatalf("want redis down, got %#v", body.Checks)
+	}
+}
+
+// Without the limiter, Redis is genuinely optional: a down client is reported
+// as degraded, but the process can still serve traffic.
+func TestReadinessAllowsOptionalRedisWhenLimiterDoesNotUseIt(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
+		Redis:     config.RedisConfig{Mode: config.RedisModeOptional},
+		RateLimit: config.RateLimitConfig{Enabled: false},
+	}
+	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{
+		Users:    stubUserService{},
+		Postgres: stubPinger{},
+		Redis:    unreachableRedis(t),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 for optional Redis without the limiter, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Checks map[string]string `json:"checks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode readiness: %v", err)
+	}
+	if body.Checks["redis"] != "degraded" {
+		t.Fatalf("want redis degraded, got %#v", body.Checks)
+	}
+}
+
 type countingWriter struct {
 	http.ResponseWriter
 	headerWrites int

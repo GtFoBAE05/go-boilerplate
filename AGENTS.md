@@ -52,6 +52,8 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
 - `DecodePage`: invalid `limit`/`offset` is 422, not clamped.
 - Rows-affected writes map 0 rows to `service.ErrNotFound`; never a silent 204.
 - No `RealIP`; rate limiting keys off `RemoteAddr`.
+- A panic after a response has started aborts the connection; it cannot be
+  turned into an error envelope.
 
 ### Config
 
@@ -86,6 +88,10 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   user id, email, or `trace_id`. Do not add `/metrics`.
 - Probes are excluded from tracing/metrics; `/readyz` pings under an unsampled
   parent span.
+- Redis is required for `/readyz` whenever the rate limiter uses it: the limiter
+  fails closed, so a 200/degraded probe would keep a replica answering 503 in
+  rotation. Optional Redis is only optional when the limiter is off or fell back
+  to local counters at startup.
 - `telemetry.Setup` runs before `postgres.NewPool` and `redis.New`.
 - Keep `honor_labels: true` in `deploy/prometheus.yml`.
 

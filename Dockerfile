@@ -34,6 +34,7 @@ COPY --from=build /out/api ./api
 # set (JSON logs at info, no boot-time migrations, pprof off). .env.example
 # documents every available key; it is a development convenience, never shipped.
 EXPOSE 8080
-# The admin listener (metrics, pprof) binds 127.0.0.1 and is deliberately not
-# exposed: reach it from a sidecar or via port-forward.
+# The pprof listener binds 127.0.0.1 and is deliberately not exposed: reach it
+# from a sidecar or via port-forward. Metrics are pushed over OTLP, not served
+# on a port.
 ENTRYPOINT ["/app/api"]
