@@ -53,6 +53,17 @@ linters:
               desc: >-
                 only app/ and server/ may import config; take plain values or a
                 narrow interface instead.
+        # A handler that imports sqlc/pgx has bypassed the layer that owns
+        # business rules and transactions. The architecture test catches this
+        # too, but lint points at the line the author just wrote.
+        handler-stays-http-only:
+          files:
+            - "**/internal/handler/**"
+          deny:
+            - pkg: github.com/GtFoBAE05/go-boilerplate/internal/repository
+              desc: >-
+                handlers call services, never the repository. Put the query in
+                the service that owns the use case.
   exclusions:
     generated: lax
     paths:
