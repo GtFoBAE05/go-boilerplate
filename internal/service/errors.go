@@ -25,11 +25,16 @@ type Error = errors.Error
 var NewError = errors.NewError
 
 var (
+	// ErrUnauthenticated reports invalid credentials.
 	ErrUnauthenticated = errors.ErrUnauthenticated
-	ErrForbidden       = errors.ErrForbidden
-	ErrNotFound        = errors.ErrNotFound
-	ErrConflict        = errors.ErrConflict
-	ErrInternal        = errors.ErrInternal
+	// ErrForbidden reports a caller that is known but not allowed.
+	ErrForbidden = errors.ErrForbidden
+	// ErrNotFound reports a missing resource; handlers map it to 404.
+	ErrNotFound = errors.ErrNotFound
+	// ErrConflict reports a write that conflicts with existing data.
+	ErrConflict = errors.ErrConflict
+	// ErrInternal reports a failure whose detail must not reach the client.
+	ErrInternal = errors.ErrInternal
 )
 
 // IsUniqueViolation reports whether err is a Postgres unique-constraint
