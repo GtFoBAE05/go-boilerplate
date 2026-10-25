@@ -14,12 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	"go-boilerplate/internal/config"
-	"go-boilerplate/internal/platform/cache"
-	"go-boilerplate/internal/platform/postgres"
-	"go-boilerplate/internal/platform/redis"
-	"go-boilerplate/internal/platform/telemetry"
-	"go-boilerplate/internal/server"
+	"github.com/GtFoBAE05/go-boilerplate/internal/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/cache"
+	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/redis"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/telemetry"
+	"github.com/GtFoBAE05/go-boilerplate/internal/server"
 
 	goredis "github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
@@ -101,7 +102,7 @@ func Run(cfg *config.Config) error {
 	}
 	defer closeRedis()
 
-	redisRequired := cfg.Redis.Mode == config.RedisModeRequired
+	redisRequired := cfg.Redis.Mode == platformconfig.RedisModeRequired
 	srv := server.New(cfg, log, buildDeps(pool, rdb, redisRequired, svcCache, log))
 	pprofSrv := server.NewPprofServer(cfg.Pprof.Enabled, cfg.Pprof.Port, log)
 
@@ -192,7 +193,7 @@ func setupRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 ) {
 	noop := func() {}
 
-	if cfg.Redis.Mode == config.RedisModeDisabled {
+	if cfg.Redis.Mode == platformconfig.RedisModeDisabled {
 		log.Info("redis disabled, running without cache")
 		return nil, nil, noop, nil
 	}
@@ -202,7 +203,7 @@ func setupRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 		redis.DB(cfg.Redis.DB),
 	)
 	if err != nil {
-		if cfg.Redis.Mode == config.RedisModeRequired {
+		if cfg.Redis.Mode == platformconfig.RedisModeRequired {
 			return nil, nil, noop, fmt.Errorf("connect redis (required): %w", err)
 		}
 		log.Warn("redis unreachable, running without cache", "error", err)

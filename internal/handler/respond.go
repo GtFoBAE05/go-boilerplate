@@ -16,7 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -32,8 +32,11 @@ const (
 	CodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
 	CodePayloadTooLarge  = "PAYLOAD_TOO_LARGE"
 	CodeRateLimited      = "RATE_LIMITED"
-	CodeTimeout          = "TIMEOUT"
-	CodeInternal         = "INTERNAL"
+	// CodeRateLimitUnavailable indicates the shared Redis limiter could not
+	// check a request, so the request was refused rather than let through.
+	CodeRateLimitUnavailable = "RATE_LIMIT_UNAVAILABLE"
+	CodeTimeout              = "TIMEOUT"
+	CodeInternal             = "INTERNAL"
 )
 
 // Meta carries list pagination info.
@@ -51,6 +54,10 @@ type errorBody struct {
 	Code    string            `json:"code"`
 	Message string            `json:"message"`
 	Fields  map[string]string `json:"fields,omitempty"`
+	// Details carries structured context the client acts on (e.g. the rules
+	// blocking a member removal). Populated from the domain error's optional
+	// Details; nil for every other error.
+	Details any `json:"details,omitempty"`
 }
 
 type errorEnvelope struct {
@@ -94,6 +101,14 @@ func OK(w http.ResponseWriter, status int, data any) {
 // {"data": [...], "meta": {...}}.
 func OKList(w http.ResponseWriter, data any, meta Meta) {
 	WriteJSON(w, http.StatusOK, successEnvelope{Data: data, Meta: &meta})
+}
+
+// NoContent writes a 204 with no body. It exists so a handler that returns no
+// data still goes through this file: "every response through respond.go" is an
+// invariant worth keeping literally true, or the one hand-written status is
+// where a future envelope change quietly stops applying.
+func NoContent(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // WriteError writes an error envelope: {"error": {"code", "message"}}.
@@ -143,7 +158,11 @@ func WriteServiceError(w http.ResponseWriter, r *http.Request, log *slog.Logger,
 	var domainErr *service.Error
 	if errors.As(err, &domainErr) {
 		span.SetStatus(codes.Error, domainErr.Code)
-		WriteError(w, domainErr.Status, domainErr.Code, domainErr.Message)
+		WriteJSON(w, domainErr.Status, errorEnvelope{Error: errorBody{
+			Code:    domainErr.Code,
+			Message: domainErr.Message,
+			Details: domainErr.Details,
+		}})
 		return
 	}
 

@@ -32,6 +32,15 @@ func newValidator() *validator.Validate {
 // payloads are small; anything bigger is a mistake or an attack.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
+// normalizer is implemented by request DTOs that must canonicalize input before
+// validation. Running it here keeps the order identical for every resource:
+// decode -> normalize -> validate -> service.
+//
+// Trimming in the handler after validation is a real bug, not a style issue: a
+// whitespace-only name passes `required,min=1` and then reaches the database as
+// an empty string.
+type normalizer interface{ Normalize() }
+
 // DecodeValid decodes the JSON body into T and validates it against its
 // `validate` tags. On failure it writes the error response (413 for
 // oversized bodies, 400 for broken JSON or unknown fields, 422 with
@@ -54,6 +63,11 @@ func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 		// Decoder errors describe the client's own payload; safe to echo.
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
 		return req, false
+	}
+	// Normalize before validating: validation must see the value that will be
+	// persisted, not the one the client happened to send.
+	if n, ok := any(&req).(normalizer); ok {
+		n.Normalize()
 	}
 	if err := validate.Struct(req); err != nil {
 		var verrs validator.ValidationErrors

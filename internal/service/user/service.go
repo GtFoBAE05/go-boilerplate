@@ -3,7 +3,7 @@
 //
 // Consumers import it aliased to avoid clashing with handler/user:
 //
-//	usersvc "go-boilerplate/internal/service/user"
+//	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 package user
 
 import (
@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go-boilerplate/internal/platform/cache"
-	"go-boilerplate/internal/repository"
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/platform/cache"
+	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
@@ -22,6 +22,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// ErrEmailTaken is this resource's failure, not a shared one: only user writes
+// enforce a unique email. Declared here so the shared error file never grows a
+// case per resource.
+var ErrEmailTaken = service.NewError("EMAIL_TAKEN", 409, "email already taken")
 
 // UserService is the user business-logic contract consumed by handlers.
 type UserService interface {
@@ -62,7 +67,7 @@ func (s *userService) Create(ctx context.Context, in CreateInput) (CreateOutput,
 		if service.IsUniqueViolation(err) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "email already taken")
-			return CreateOutput{}, service.ErrEmailTaken
+			return CreateOutput{}, ErrEmailTaken
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "create user failed")
@@ -160,7 +165,7 @@ func (s *userService) Update(ctx context.Context, id int64, in UpdateInput) (Upd
 		updated, err = q.UpdateUser(ctx, params)
 		if err != nil {
 			if service.IsUniqueViolation(err) {
-				return service.ErrEmailTaken
+				return ErrEmailTaken
 			}
 			return fmt.Errorf("update user %d: %w", id, err)
 		}

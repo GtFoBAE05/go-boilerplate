@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 
 # Dependencies resolve in their own layer so source edits don't re-download them.
@@ -21,9 +21,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
       -ldflags="-s -w \
-        -X go-boilerplate/internal/app.version=${VERSION} \
-        -X go-boilerplate/internal/app.commit=${COMMIT} \
-        -X go-boilerplate/internal/app.buildDate=${BUILD_DATE}" \
+        -X github.com/GtFoBAE05/go-boilerplate/internal/app.version=${VERSION} \
+        -X github.com/GtFoBAE05/go-boilerplate/internal/app.commit=${COMMIT} \
+        -X github.com/GtFoBAE05/go-boilerplate/internal/app.buildDate=${BUILD_DATE}" \
       -o /out/api ./cmd/api
 
 FROM gcr.io/distroless/static-debian12:nonroot

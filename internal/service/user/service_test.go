@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"go-boilerplate/internal/repository"
-	"go-boilerplate/internal/service"
+	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
+	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"github.com/jackc/pgx/v5"
 )

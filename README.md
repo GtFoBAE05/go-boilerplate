@@ -1,7 +1,7 @@
 # go-boilerplate
 
 [![CI](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml/badge.svg)](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml)
-![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)
+![Go Version](https://img.shields.io/badge/go-1.27-00ADD8?logo=go)
 
 Production-ready Go HTTP API boilerplate: clone it, rename the module, copy the
 example resource, and start writing business logic. Community-standard layout
@@ -14,7 +14,7 @@ enforced by a linter, not by convention).
 - **Versioned migrations** — [goose](https://github.com/pressly/goose) files embedded in the binary, applied at boot (or from CI in prod)
 - **Cache-aside Redis** — optional by config: disabled / degrade-gracefully / required
 - **Full observability** — OTel traces and metrics pushed over OTLP (handler → service → SQL/Redis), trace-correlated `slog` logs
-- **Hardened HTTP** — single response envelope, per-IP rate limiting, request timeouts, 1 MiB body cap, strict JSON validation (query params included)
+- **Hardened HTTP** — single response envelope, per-IP rate limiting, request and header deadlines, 1 MiB body cap, strict JSON validation (query params included)
 - **Loopback-only pprof** — profiling on its own private port, off by default, never on the public API
 - **Validated config** — every knob checked at boot, all errors reported at once, secrets redacted in logs
 - **Guardrail CI** — lint, race tests, testcontainers integration suite, pinned `govulncheck`, sqlc drift check, image build, Dependabot
@@ -39,7 +39,7 @@ them generically and never grows a case per resource.
 
 ## Quickstart
 
-Prerequisites: Go 1.25+, Docker.
+Prerequisites: Go 1.27+, Docker.
 
 ```bash
 cp .env.example .env      # local settings; without it you get production defaults
@@ -95,15 +95,18 @@ cmd/api/              Entry point: loads config, calls app.Run(cfg)
 internal/
   app/                Lifecycle (app.go, stable) + DI wiring (di.go, grows per resource)
                       version.go holds -ldflags build provenance
-  config/             Config loading + validation (env vars, .env for dev)
-  platform/           Generic infra adapters — know nothing about this app
+  config/             This app's root Config, Load, defaults (sections live in platform/config)
+  platform/           Generic infra — know nothing about this app, enforced by depguard
+    config/           Section types + per-section validators + .env parser
+    errors/           Domain error type, shared sentinels, unique-violation helper
     postgres/         pgxpool construction + goose migration runner
     redis/            Redis client lifecycle (shared by all Redis consumers)
     cache/            JSON cache-aside helper (one consumer of the client)
+    ratelimit/        Shared httprate counter backed by Redis
     telemetry/        slog setup + OTel tracer/meter providers
   repository/         sqlc-generated queries (run `make sqlc`) + hand-written Store (tx wrapper)
-  service/            Shared service bits: service.Error type, storage-error helpers
-    user/             User business logic: service.go, model.go, input.go
+  service/            Re-export of platform/errors under the name services use
+    user/             User business logic: service.go, model.go
   handler/            Shared HTTP plumbing: respond, validate, page
     health/           Liveness/readiness probes (readiness drains on shutdown)
     user/             /users resource: handler.go, request.go, response.go, routes.go
@@ -116,7 +119,7 @@ deploy/               OTel collector, Prometheus, and alert rule configs
 
 `internal/platform/` is the one grouped directory, and it earns the nesting by
 having a rule a linter can check: **nothing under it may import
-`go-boilerplate/internal`**. A `depguard` rule fails the build otherwise. That is
+`github.com/GtFoBAE05/go-boilerplate/internal`**. A `depguard` rule fails the build otherwise. That is
 what keeps infra constructible from a test with no `config.Config` — and what
 stops `platform/` from decaying into the `util/`-style dumping ground these
 directories usually become. A second rule denies `internal/config` to
@@ -133,10 +136,14 @@ Every API response has exactly one shape, enforced centrally in
 // success                              // failure
 {"data": {...}}                         {"error": {"code": "NOT_FOUND", "message": "..."}}
 {"data": [...], "meta": {"limit": 20,   {"error": {"code": "VALIDATION_FAILED", "message": "...",
-           "offset": 0}}                           "fields": {"email": "is required"}}}
+           "offset": 0}}                           "fields": {"email": "is required"},
+                                                    "details": {"rules": ["..."]}}}
 ```
 
 Clients branch on `error.code` (machine-readable), never on `message`.
+`details` is optional structured context the client can act on (which rules
+blocked an operation, say); it is set with `ErrX.WithDetails(...)`, never by
+parsing the message text.
 Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
 
 ### Request guardrails
@@ -149,11 +156,16 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
   a page the client never asked for.
 - **Rate limiting**: the `/api/v1` subtree is limited per client IP via
   [httprate](https://github.com/go-chi/httprate); probes are never limited.
-  Over the limit → `429` with the `RATE_LIMITED` envelope. Configure under
-  `ratelimit`; disable with `RATELIMIT_ENABLED=false`. Counters are
-  **per process**: N replicas allow N×`requests`, so use a shared store
-  ([httprate-redis](https://github.com/go-chi/httprate-redis)) if you need a
-  hard global cap.
+  Over the limit → `429 RATE_LIMITED`. With Redis configured the counter is
+  shared, so the cap is global across replicas; if Redis fails mid-request the
+  limiter **fails closed** with `503 RATE_LIMIT_UNAVAILABLE` rather than
+  quietly granting each replica its own budget. With `REDIS_MODE=disabled` the
+  limiter is per-process — correct for one instance, N×`requests` for N.
+- **Normalization before validation**: a DTO can implement `Normalize()`;
+  `DecodeValid` calls it between decode and validate, so a whitespace-only name
+  is rejected instead of being trimmed to `""` after it passes `min=1`.
+- **Header deadline**: `server.read_header_timeout` (default 5s, validated
+  `<= read_timeout`) is the slowloris guard; headers are capped at 1 MiB.
 - **Timeouts**: every request gets a context deadline (`server.request_timeout`);
   downstream pgx/redis calls abort when it fires and the client gets a `504`
   with the `TIMEOUT` code. A client that disconnects gets no body written.
@@ -162,7 +174,8 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
 
 `error.code` is the stable contract. Transport-level codes (`BAD_REQUEST`,
 `VALIDATION_FAILED`, `NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`,
-`RATE_LIMITED`, `TIMEOUT`, `INTERNAL`) live in `internal/handler`. Domain codes
+`RATE_LIMITED`, `RATE_LIMIT_UNAVAILABLE`, `TIMEOUT`, `INTERNAL`) live in
+`internal/handler`. Domain codes
 live on the error itself:
 
 ```go
@@ -225,11 +238,12 @@ must be one the app actually reads.
 
 Every key is **validated at boot** and all problems are reported together, so a
 bad override fails fast with the full list instead of degrading silently:
-port ranges, enum values (`app.env`, `log.level`, `log.format`,
-`postgres.query_exec_mode`, `redis.mode`), `otel.sample_ratio` ∈ [0,1], and
-cross-field rules — `request_timeout < write_timeout` (so the 504 can still be
-written) and `shutdown_timeout >= request_timeout` (so shutdown outlasts one
-in-flight request). Config structs holding secrets implement `slog.LogValuer`,
+port ranges, enum values (`service.env`, `log.level`, `log.format`,
+`postgres.query_exec_mode`, `redis.mode`), `otel.traces_sampler_arg` ∈ [0,1],
+and cross-field rules — `request_timeout < write_timeout` (so the 504 can still
+be written), `shutdown_timeout >= request_timeout` (so shutdown outlasts one
+in-flight request) and `read_header_timeout <= read_timeout` (so the slowloris
+guard can actually fire). Config structs holding secrets implement `slog.LogValuer`,
 so logging a config can't leak a DSN password.
 
 Behind a transaction-mode connection pooler (pgbouncer, RDS Proxy), set
@@ -372,11 +386,11 @@ resources.
 ### Migrations
 
 Schema changes are goose SQL files under `db/migrations/` (`-- +goose Up` /
-`-- +goose Down` in one file), embedded in the binary and applied at boot while
-`postgres.migrate` is true — the default for local dev; disable it in prod and
-run goose from CI instead — which is the default outside `.env.example`, so the
-production image never migrates unless you ask it to. sqlc reads the same
-migration files as its schema, so nothing is kept in sync by hand.
+`-- +goose Down` in one file), embedded in the binary and applied at boot when
+`postgres.migrate` is true. It is **off by default** so production replicas
+never race each other on rollout; `.env.example` turns it on for local dev.
+sqlc reads the same migration files as its schema, so nothing is kept in sync
+by hand.
 
 ## Extending
 
@@ -406,8 +420,6 @@ contested ones to you. Deliberately **not** included:
 - **gRPC / message queues / workers** — add them when you need them. The
   lifecycle already runs on an `errgroup`, so a second long-running component is
   one `g.Go` away.
-- **Distributed rate limiting** — the in-process limiter is honest about being
-  per-replica; swap the store when a global cap actually matters
 
 One complete example vertical (`user`) is the documentation: copy it, rename
 it, ship. AI coding agents get their own guidance in [AGENTS.md](AGENTS.md).

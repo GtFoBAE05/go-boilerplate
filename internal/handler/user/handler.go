@@ -6,9 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
-	"go-boilerplate/internal/handler"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
@@ -16,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 var tracer = otel.Tracer("handler/user")
@@ -44,8 +43,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u, err := h.svc.Create(ctx, usersvc.CreateInput{
-		Name:  strings.TrimSpace(req.Name),
-		Email: strings.TrimSpace(req.Email),
+		Name:  req.Name,
+		Email: req.Email,
 	})
 	if err != nil {
 		handler.WriteServiceError(w, r, h.log, err)
@@ -123,8 +122,6 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			"at least one of name or email must be provided")
 		return
 	}
-	trim(req.Name)
-	trim(req.Email)
 
 	u, err := h.svc.Update(ctx, id, usersvc.UpdateInput{Name: req.Name, Email: req.Email})
 	if err != nil {
@@ -153,13 +150,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		handler.WriteServiceError(w, r, h.log, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func trim(s *string) {
-	if s != nil {
-		*s = strings.TrimSpace(*s)
-	}
+	handler.NoContent(w)
 }
 
 func pathID(r *http.Request) (int64, error) {

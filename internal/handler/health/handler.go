@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-boilerplate/internal/handler"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
 	"go.opentelemetry.io/otel/trace"
 )

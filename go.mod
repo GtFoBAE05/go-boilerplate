@@ -1,11 +1,12 @@
-module go-boilerplate
+module github.com/GtFoBAE05/go-boilerplate
 
-go 1.25.12
+go 1.27.1
 
 require (
 	github.com/exaring/otelpgx v0.11.1
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-chi/httprate v0.16.0
+	github.com/go-chi/httprate-redis v0.7.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pressly/goose/v3 v3.27.2

@@ -36,7 +36,7 @@ linters:
           files:
             - "**/internal/platform/**"
           deny:
-            - pkg: go-boilerplate/internal
+            - pkg: github.com/GtFoBAE05/go-boilerplate/internal
               desc: >-
                 internal/platform must not import application packages. If an
                 adapter needs app knowledge, the decision belongs in app/ and
@@ -49,7 +49,7 @@ linters:
             - "**/internal/service/**"
             - "**/internal/repository/**"
           deny:
-            - pkg: go-boilerplate/internal/config
+            - pkg: github.com/GtFoBAE05/go-boilerplate/internal/config
               desc: >-
                 only app/ and server/ may import config; take plain values or a
                 narrow interface instead.
@@ -64,10 +64,10 @@ formatters:
     - goimports
   settings:
     gofumpt:
-      # The module path has no dot, so without this gofumpt's heuristic
-      # mistakes our own imports for standard library and fights goimports
-      # over import grouping.
-      module-path: go-boilerplate
+      # Stated explicitly rather than inferred: this is the grouping the
+      # README and AGENTS.md document, and a future module rename must not
+      # silently change how imports are sorted.
+      module-path: github.com/GtFoBAE05/go-boilerplate
     goimports:
       local-prefixes:
-        - go-boilerplate
+        - github.com/GtFoBAE05/go-boilerplate

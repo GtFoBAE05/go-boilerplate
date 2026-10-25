@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 
-	"go-boilerplate/internal/app"
-	"go-boilerplate/internal/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/app"
+	"github.com/GtFoBAE05/go-boilerplate/internal/config"
 )
 
 func main() {

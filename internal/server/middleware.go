@@ -6,7 +6,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"go-boilerplate/internal/handler"
+	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"

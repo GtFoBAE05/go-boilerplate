@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"go-boilerplate/internal/config"
+	"github.com/GtFoBAE05/go-boilerplate/internal/config"
+	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
+
+	goredis "github.com/redis/go-redis/v9"
 
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -19,7 +22,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 
-	usersvc "go-boilerplate/internal/service/user"
+	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
 // stubUserService lets the router build without a real service; List returns
@@ -40,10 +43,45 @@ func newTestServer(t *testing.T) http.Handler {
 func newTestServerWith(t *testing.T) *Server {
 	t.Helper()
 	cfg := &config.Config{
-		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
-		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
+		Server:    platformconfig.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
+		Redis:     platformconfig.RedisConfig{Mode: platformconfig.RedisModeDisabled},
+		RateLimit: platformconfig.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
 	}
 	return New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}})
+}
+
+// The header deadline is the slowloris guard; MaxHeaderBytes keeps a single
+// request from spending the connection's read budget on headers. Both are
+// asserted because neither shows up in behavior tests until under attack.
+func TestHTTPServerHeaderLimits(t *testing.T) {
+	s := newTestServerWith(t)
+
+	if got := s.http.ReadHeaderTimeout; got != 5*time.Second {
+		t.Fatalf("want ReadHeaderTimeout 5s, got %s", got)
+	}
+	if got := s.http.MaxHeaderBytes; got != maxHeaderBytes {
+		t.Fatalf("want MaxHeaderBytes %d, got %d", maxHeaderBytes, got)
+	}
+}
+
+// Without a Redis client the limiter stays in-process. That is the development
+// mode, not a fallback: a silent per-replica budget in production is the bug
+// the shared counter exists to fix.
+func TestRateLimitOptionsWithoutRedis(t *testing.T) {
+	if got := rateLimitOptions(nil, "test:api", slog.New(slog.DiscardHandler)); got != nil {
+		t.Fatalf("want no shared counter options, got %d", len(got))
+	}
+}
+
+// With a client, both the counter and the fail-closed handler are wired in.
+func TestRateLimitOptionsWithRedis(t *testing.T) {
+	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:0"})
+	defer func() { _ = client.Close() }()
+
+	got := rateLimitOptions(client, "test:api", slog.New(slog.DiscardHandler))
+	if len(got) != 2 {
+		t.Fatalf("want counter + error handler, got %d options", len(got))
+	}
 }
 
 func TestRateLimitEnvelope(t *testing.T) {
