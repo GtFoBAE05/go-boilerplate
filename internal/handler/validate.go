@@ -39,7 +39,7 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 //
 // Trimming in the handler after validation is a real bug, not a style issue: a
 // whitespace-only name passes `required,min=1` and then reaches the database as
-// an empty string.
+// an empty string. DecodeValid calls Normalize whether T is a value or pointer.
 type normalizer interface{ Normalize() }
 
 // DecodeValid decodes the JSON body into T and validates it against its
@@ -75,6 +75,9 @@ func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	// Normalize before validating: validation must see the value that will be
 	// persisted, not the one the client happened to send.
 	if n, ok := any(&req).(normalizer); ok {
+		n.Normalize()
+	} else if n, ok := any(req).(normalizer); ok {
+		// T may already be a pointer type; then &req is **T and matches nothing.
 		n.Normalize()
 	}
 	if err := validate.Struct(req); err != nil {
