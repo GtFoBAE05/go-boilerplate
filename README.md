@@ -114,7 +114,7 @@ internal/
 db/
   migrations/         goose SQL migrations (embedded, applied at boot)
   queries/            sqlc query sources
-deploy/               OTel collector, Prometheus, and alert rule configs
+deploy/               OTel collector, Jaeger, Prometheus, and alert rule configs
 ```
 
 `internal/platform/` is the one grouped directory, and it earns the nesting by
