@@ -5,7 +5,7 @@
 # They are kept out of go.mod on purpose:
 # sqlc's dependency tree (wazero, the tidb parser, cel-go) would otherwise be
 # downloaded by the Dockerfile's `go mod download` on every image build.
-GOLANGCI_VERSION ?= v2.12.2
+GOLANGCI_VERSION ?= v2.15.0
 GOOSE_VERSION ?= v3.27.3
 SQLC_VERSION  ?= v1.30.0
 VULN_VERSION  ?= v1.1.4

@@ -17,7 +17,7 @@ env:
   # Keep these in sync with the versions pinned in the Makefile.
   SQLC_VERSION: "1.30.0"
   VULN_VERSION: "v1.1.4"
-  GOLANGCI_VERSION: "v2.12.2"
+  GOLANGCI_VERSION: "v2.15.0"
 
 jobs:
   lint:
@@ -32,6 +32,12 @@ jobs:
           # Pinned to the version developers run locally, so CI and local
           # results never drift. Bump both together.
           version: ${{ env.GOLANGCI_VERSION }}
+          # The published release binary is built with an older Go than go.mod
+          # targets, and golangci-lint refuses to run in that case (exit 3).
+          # Building from source with the CI toolchain is what `make lint`
+          # already does locally, so this is the only mode where the pin means
+          # the same thing in both places.
+          install-mode: goinstall
 
   # Proves the documented invariant that `go test ./...` needs no Docker: this
   # job has no services and must stay that way.
