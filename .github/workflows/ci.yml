@@ -22,6 +22,7 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -43,6 +44,7 @@ jobs:
   # job has no services and must stay that way.
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -55,12 +57,16 @@ jobs:
   # tests on top of everything above.
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: go test -race -tags integration ./... 2>&1 | tee /tmp/integration.log
+      # Public Actions logs need authentication here, so a failed run page
+      # shows only "process completed with exit code 1". Surface the tail as
+      # an annotation; this is permanent, not a temporary debugging aid.
       - if: failure()
         run: |
           msg=$(tail -c 3500 /tmp/integration.log | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
@@ -68,6 +74,7 @@ jobs:
 
   vuln:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -76,6 +83,9 @@ jobs:
       # Pinned, not @latest: an unpinned scanner turns an unrelated upstream
       # release into a red build on a branch that changed nothing.
       - run: go run golang.org/x/vuln/cmd/govulncheck@${{ env.VULN_VERSION }} ./... 2>&1 | tee /tmp/vuln.log
+      # Public Actions logs need authentication here, so a failed run page
+      # shows only "process completed with exit code 1". Surface the tail as
+      # an annotation; this is permanent, not a temporary debugging aid.
       - if: failure()
         run: |
           msg=$(tail -c 3500 /tmp/vuln.log | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
@@ -83,6 +93,7 @@ jobs:
 
   sqlc-diff:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: sqlc-dev/setup-sqlc@v5
@@ -94,6 +105,7 @@ jobs:
   # else in CI loads it, and a developer copying it to .env finds out first.
   config:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -107,6 +119,7 @@ jobs:
   # pinned and working.
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - run: |
