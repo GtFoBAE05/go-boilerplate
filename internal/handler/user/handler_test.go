@@ -99,6 +99,39 @@ func TestCreateValidation(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsLongEmailBeforeService(t *testing.T) {
+	calls := 0
+	svc := &mockUserService{
+		create: func(context.Context, usersvc.CreateInput) (usersvc.CreateOutput, error) {
+			calls++
+			return usersvc.CreateOutput{}, nil
+		},
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+	body := `{"name":"a","email":"` + strings.Repeat("a", 395) + `@b.co"}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error struct {
+			Fields map[string]string `json:"fields"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if _, ok := resp.Error.Fields["email"]; !ok {
+		t.Fatalf("want email field error, got %v", resp.Error.Fields)
+	}
+	if calls != 0 {
+		t.Fatalf("service called %d times for invalid email", calls)
+	}
+}
+
 func TestCreateBodyTooLarge(t *testing.T) {
 	// A body over the 1 MiB DecodeValid cap must be rejected with 413 and the
 	// PAYLOAD_TOO_LARGE envelope, before the service is ever reached.
