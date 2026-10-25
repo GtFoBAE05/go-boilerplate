@@ -57,9 +57,7 @@ func NewUserService(repo repository.Store, c cache.Cache, log *slog.Logger) User
 func cacheKey(id int64) string { return fmt.Sprintf("user:%d", id) }
 
 func (s *userService) Create(ctx context.Context, in CreateInput) (CreateOutput, error) {
-	ctx, span := s.tracer.Start(ctx, "UserService.Create",
-		trace.WithAttributes(attribute.String("user.email", in.Email)),
-	)
+	ctx, span := s.tracer.Start(ctx, "UserService.Create")
 	defer span.End()
 
 	user, err := s.repo.CreateUser(ctx, repository.CreateUserParams{Name: in.Name, Email: in.Email})
