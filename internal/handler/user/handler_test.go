@@ -201,6 +201,36 @@ func TestGetNotFoundMapsTo404(t *testing.T) {
 	}
 }
 
+func TestCreateEmailTakenMapsTo409(t *testing.T) {
+	svc := &mockUserService{
+		create: func(context.Context, usersvc.CreateInput) (usersvc.CreateOutput, error) {
+			return usersvc.CreateOutput{}, usersvc.ErrEmailTaken
+		},
+	}
+	h := NewHandler(svc, slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"alice","email":"a@b.co"}`))
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data  json.RawMessage `json:"data"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if resp.Error.Code != "EMAIL_TAKEN" || resp.Error.Message == "" || len(resp.Data) != 0 {
+		t.Fatalf("unexpected error envelope: %s", rec.Body.String())
+	}
+}
+
 func TestCreateTrimsBeforeService(t *testing.T) {
 	var gotIn usersvc.CreateInput
 	svc := &mockUserService{

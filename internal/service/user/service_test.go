@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // fakeStore implements repository.Store via configurable funcs. ExecTx just
@@ -18,6 +20,7 @@ type fakeStore struct {
 	repository.Querier
 	getUser          func(ctx context.Context, id int64) (repository.User, error)
 	getUserForUpdate func(ctx context.Context, id int64) (repository.User, error)
+	listUsers        func(ctx context.Context, arg repository.ListUsersParams) ([]repository.User, error)
 	createUser       func(ctx context.Context, arg repository.CreateUserParams) (repository.User, error)
 	updateUser       func(ctx context.Context, arg repository.UpdateUserParams) (repository.User, error)
 	deleteUser       func(ctx context.Context, id int64) (int64, error)
@@ -31,6 +34,10 @@ func (f *fakeStore) GetUser(ctx context.Context, id int64) (repository.User, err
 
 func (f *fakeStore) GetUserForUpdate(ctx context.Context, id int64) (repository.User, error) {
 	return f.getUserForUpdate(ctx, id)
+}
+
+func (f *fakeStore) ListUsers(ctx context.Context, arg repository.ListUsersParams) ([]repository.User, error) {
+	return f.listUsers(ctx, arg)
 }
 
 func (f *fakeStore) CreateUser(ctx context.Context, arg repository.CreateUserParams) (repository.User, error) {
@@ -54,14 +61,24 @@ type fakeCache struct {
 	sets  int
 }
 
-func (f *fakeCache) Get(_ context.Context, key string, _ any) (bool, error) {
-	_, ok := f.store[key]
-	return ok, nil
+func (f *fakeCache) Get(_ context.Context, key string, dst any) (bool, error) {
+	data, ok := f.store[key]
+	if !ok {
+		return false, nil
+	}
+	if err := json.Unmarshal(data, dst); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func (f *fakeCache) Set(_ context.Context, key string, _ any) error {
+func (f *fakeCache) Set(_ context.Context, key string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
 	f.sets++
-	f.store[key] = []byte("cached")
+	f.store[key] = data
 	return nil
 }
 
@@ -111,6 +128,79 @@ func TestGetPopulatesCacheOnMiss(t *testing.T) {
 	}
 	if _, ok := c.store["user:7"]; !ok {
 		t.Fatal("expected user:7 cached")
+	}
+}
+
+func TestCreateMapsUniqueViolationToEmailTaken(t *testing.T) {
+	repo := &fakeStore{
+		createUser: func(context.Context, repository.CreateUserParams) (repository.User, error) {
+			return repository.User{}, &pgconn.PgError{Code: "23505"}
+		},
+	}
+	svc := NewUserService(repo, nil, discardLogger())
+
+	_, err := svc.Create(context.Background(), CreateInput{Name: "alice", Email: "a@example.com"})
+	if !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("want ErrEmailTaken, got %v", err)
+	}
+}
+
+func TestUpdateMapsUniqueViolationToEmailTaken(t *testing.T) {
+	repo := &fakeStore{
+		getUserForUpdate: func(_ context.Context, id int64) (repository.User, error) {
+			return repository.User{ID: id, Name: "alice", Email: "a@example.com"}, nil
+		},
+		updateUser: func(context.Context, repository.UpdateUserParams) (repository.User, error) {
+			return repository.User{}, &pgconn.PgError{Code: "23505"}
+		},
+	}
+	svc := NewUserService(repo, nil, discardLogger())
+
+	email := "b@example.com"
+	_, err := svc.Update(context.Background(), 7, UpdateInput{Email: &email})
+	if !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("want ErrEmailTaken, got %v", err)
+	}
+}
+
+func TestGetServesCacheHitWithoutQuerying(t *testing.T) {
+	data, err := json.Marshal(UserCache{ID: 7, Name: "alice", Email: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queries := 0
+	repo := &fakeStore{
+		getUser: func(context.Context, int64) (repository.User, error) {
+			queries++
+			return repository.User{}, errors.New("unexpected database query")
+		},
+	}
+	svc := NewUserService(repo, &fakeCache{store: map[string][]byte{"user:7": data}}, discardLogger())
+
+	got, err := svc.Get(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ID != 7 || got.Name != "alice" || got.Email != "a@example.com" {
+		t.Fatalf("unexpected cached user: %+v", got)
+	}
+	if queries != 0 {
+		t.Fatalf("store queried %d times on cache hit", queries)
+	}
+}
+
+func TestListPropagatesStoreError(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	repo := &fakeStore{
+		listUsers: func(context.Context, repository.ListUsersParams) ([]repository.User, error) {
+			return nil, storeErr
+		},
+	}
+	svc := NewUserService(repo, nil, discardLogger())
+
+	_, err := svc.List(context.Background(), 10, 0)
+	if err == storeErr || !errors.Is(err, storeErr) {
+		t.Fatalf("want wrapped store error, got %v", err)
 	}
 }
 
