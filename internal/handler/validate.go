@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -62,6 +63,13 @@ func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 		}
 		// Decoder errors describe the client's own payload; safe to echo.
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
+		return req, false
+	}
+	// One JSON value per request. Without this, a second object is decoded by
+	// nobody and ignored, which makes a client-side duplicate or a smuggling
+	// attempt look like success.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: unexpected data after the JSON object")
 		return req, false
 	}
 	// Normalize before validating: validation must see the value that will be

@@ -53,6 +53,7 @@ func TestCreateValidation(t *testing.T) {
 		wantField  string
 	}{
 		{"invalid json", "{", http.StatusBadRequest, ""},
+		{"trailing json value", `{"name":"a","email":"a@b.co"}{"name":"b"}`, http.StatusBadRequest, ""},
 		{"unknown field", `{"name":"alice","email":"a@b.co","emial":"typo"}`, http.StatusBadRequest, ""},
 		{"missing name", `{"email":"a@b.co"}`, http.StatusUnprocessableEntity, "name"},
 		{"missing email", `{"name":"alice"}`, http.StatusUnprocessableEntity, "email"},
@@ -132,7 +133,7 @@ func TestCreateSuccess(t *testing.T) {
 	}
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"alice","email":"a@b.co"}`))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{\"name\":\"alice\",\"email\":\"a@b.co\"}\n"))
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
