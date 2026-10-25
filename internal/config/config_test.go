@@ -13,13 +13,9 @@ import (
 	"github.com/spf13/viper"
 )
 
-// .env.example is the documented list of every setting, so a key that no longer
-// exists — or a value that would not validate — has to fail here. Nothing else
-// in CI loads it, and a developer copying it to .env is the first to find out
-// otherwise.
-//
-// It is loaded as a real .env: copied into an empty working directory so the
-// same code path a developer hits is the one under test.
+// .env.example is the documented list of every setting, so a stale key or an
+// invalid value must fail here. It is loaded as a real .env from an empty
+// working directory, exercising the same path a developer hits.
 func TestShippedExampleEnvIsValid(t *testing.T) {
 	example, err := os.ReadFile("../../.env.example")
 	if err != nil {
@@ -241,10 +237,8 @@ func TestValidateReportsAllErrors(t *testing.T) {
 	}
 }
 
-// A disabled subsystem's settings are inert: an invalid pprof port must not
-// block boot when pprof is off, the same way tracing.endpoint is only required
-// when tracing is enabled. Otherwise the pre-filled default port in .env.example
-// would be a landmine for anyone who changes server.port to 6060.
+// A disabled subsystem's settings are inert: an invalid pprof port must not block
+// boot when pprof is off.
 func TestDisabledPprofSettingsAreInert(t *testing.T) {
 	cfg := validConfig()
 	cfg.Pprof = PprofConfig{Enabled: false, Port: cfg.Server.Port}
@@ -254,9 +248,8 @@ func TestDisabledPprofSettingsAreInert(t *testing.T) {
 	}
 }
 
-// OTEL_METRIC_EXPORT_INTERVAL is milliseconds per the OTel spec, not a Go
-// duration like every other interval in this config. Getting this wrong is
-// silent: "60000" read as nanoseconds would push 16000 times a second.
+// OTEL_METRIC_EXPORT_INTERVAL is milliseconds per the OTel spec, unlike every
+// other interval here; "60000" read as nanoseconds would push 16000 times a second.
 func TestMetricExportIntervalIsMilliseconds(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, DotEnvFile),
@@ -274,8 +267,7 @@ func TestMetricExportIntervalIsMilliseconds(t *testing.T) {
 	}
 }
 
-// A disabled signal's settings are inert, so a deployment that exports nothing
-// is not blocked by an endpoint it never dials.
+// A disabled signal's settings are inert, even if its endpoint is invalid.
 func TestDisabledOTelSettingsAreInert(t *testing.T) {
 	cfg := validConfig()
 	cfg.OTel.SDKDisabled = true
@@ -288,9 +280,8 @@ func TestDisabledOTelSettingsAreInert(t *testing.T) {
 	}
 }
 
-// The production-safe default matters because a deployment ships no file:
-// replicas racing to migrate on rollout must be opt-in, and a limiter must not
-// silently become per-process.
+// The production-safe defaults matter because a deployment ships no file:
+// migration and a per-process limiter must be opt-in.
 func TestProductionDefaultsAreSafe(t *testing.T) {
 	t.Chdir(t.TempDir())
 

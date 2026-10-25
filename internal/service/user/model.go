@@ -10,8 +10,7 @@ import (
 	"github.com/GtFoBAE05/go-boilerplate/internal/service"
 )
 
-// CreateInput holds everything Create needs. Need one more thing later? Add a
-// field here — the method signature stays the same, so no caller breaks.
+// CreateInput holds everything Create needs; new fields do not change the signature.
 type CreateInput struct {
 	Name  string
 	Email string
@@ -22,8 +21,7 @@ type GetInput struct {
 	ID int64
 }
 
-// ListInput carries the page window. Pagination bounds are a transport concern
-// (handler.DecodePage), but the service still receives the validated values.
+// ListInput carries the validated page window; handler.DecodePage owns its bounds.
 type ListInput struct {
 	Limit  int32
 	Offset int32
@@ -41,10 +39,8 @@ type DeleteInput struct {
 	ID int64
 }
 
-// Normalize canonicalizes the values that will be persisted. The handler does
-// this before its DTO validation too; repeating it here is deliberate: the
-// service is the last gate before the database, and a future gRPC caller will
-// not pass through the HTTP DTO.
+// Normalize canonicalizes values before persistence. Repeating the handler's
+// work is deliberate: the service is the last gate, and gRPC callers skip HTTP DTOs.
 func (in *CreateInput) Normalize() {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Email = normalizeEmail(in.Email)
@@ -70,9 +66,8 @@ func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-// Validate enforces the user invariants that must hold no matter which
-// transport called the service. The HTTP DTO tags are a fast, friendly first
-// pass; this is the rule the database also enforces.
+// Validate enforces the user invariants for every transport; the HTTP DTO tags
+// are only a first pass, and the database enforces the same rules.
 func (in CreateInput) Validate() error {
 	return validateUserFields(in.Name, in.Email)
 }
@@ -143,10 +138,8 @@ func validateEmail(email string) string {
 	return ""
 }
 
-// One Output per method. Yes, all four look identical right now — that is on
-// purpose, so do not merge them into one shared type. The moment two endpoints
-// share a struct, changing the response of one silently changes the other.
-// Wait until a third method genuinely needs the same shape before merging.
+// Keep one Output per method even while they are identical: a shared type would
+// couple endpoints that are free to diverge.
 
 // CreateOutput is what Create returns.
 type CreateOutput struct {

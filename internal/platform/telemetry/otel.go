@@ -1,13 +1,6 @@
-// Package telemetry wires the three signals this app emits: structured logs
-// (NewLogger) plus OpenTelemetry traces and metrics, both pushed over OTLP/gRPC
-// to a collector (Setup).
-//
-// Logging and tracing live together because they are one seam, not two: the
-// logger's handler reads the active span to stamp trace_id/span_id, so log
-// correlation only works when both are configured consistently.
-//
-// Metrics are pushed, not scraped: nothing here is readable without a
-// reachable collector.
+// Package telemetry wires structured logs plus OpenTelemetry traces and metrics,
+// both pushed over OTLP/gRPC. The logger stamps trace_id/span_id from the active
+// span; metrics are pushed, never scraped.
 package telemetry
 
 import (
@@ -62,31 +55,24 @@ func WithTracing(endpointURL string, sampler sdktrace.Sampler) Option {
 	}
 }
 
-// WithMetrics pushes metrics over OTLP/gRPC to endpointURL every interval, and
-// starts Go runtime instrumentation (goroutines, heap, GC).
-//
-// interval is the floor on dashboard staleness: nothing recorded inside one is
-// visible until it elapses.
+// WithMetrics pushes metrics over OTLP/gRPC every interval and starts Go runtime
+// instrumentation. interval is the floor on dashboard staleness.
 func WithMetrics(endpointURL string, interval time.Duration) Option {
 	return func(o *options) {
 		o.metrics = &metricsOptions{endpointURL: endpointURL, interval: interval}
 	}
 }
 
-// WithBuild stamps build provenance onto the OTel resource, surfacing in
-// Prometheus as target_info{service_version, vcs_ref_head_revision} — which is
-// what ties a regression to a deploy. Values come from link-time -ldflags;
-// empty strings leave the attributes off rather than recording "".
+// WithBuild stamps link-time build provenance onto the OTel resource, surfacing
+// as target_info{service_version, vcs_ref_head_revision}. Empty values are omitted.
 func WithBuild(version, revision string) Option {
 	return func(o *options) {
 		o.build = &buildOptions{version: version, revision: revision}
 	}
 }
 
-// NewSampler builds a sampler from an OTEL_TRACES_SAMPLER value. arg is the
-// ratio for the traceidratio strategies and ignored by the rest. An unknown
-// name is an error, not a fallback: sampling governs what evidence exists
-// after an incident.
+// NewSampler builds a sampler from an OTEL_TRACES_SAMPLER value. arg is the ratio
+// for traceidratio strategies; an unknown name is an error, not a fallback.
 func NewSampler(name string, arg float64) (sdktrace.Sampler, error) {
 	switch name {
 	case "always_on":
@@ -106,11 +92,8 @@ func NewSampler(name string, arg float64) (sdktrace.Sampler, error) {
 	}
 }
 
-// Setup installs the global tracer and meter providers. The returned function
-// flushes and shuts down every provider; call it on process exit.
-//
-// A signal whose option is absent installs no provider, leaving OTel's no-op in
-// place — so no caller downstream needs a nil check.
+// Setup installs the global tracer and meter providers; the returned function
+// flushes and shuts them down. Absent signals leave OTel's no-op in place.
 func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(context.Context) error, error) {
 	var o options
 	for _, opt := range opts {

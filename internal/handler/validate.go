@@ -30,24 +30,16 @@ func newValidator() *validator.Validate {
 	return v
 }
 
-// maxBodyBytes caps request bodies accepted by DecodeValid. JSON API
-// payloads are small; anything bigger is a mistake or an attack.
+// maxBodyBytes caps DecodeValid bodies; JSON API payloads are small.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
-// normalizer is implemented by request DTOs that must canonicalize input before
-// validation. Running it here keeps the order identical for every resource:
-// decode -> normalize -> validate -> service.
-//
-// Trimming in the handler after validation is a real bug, not a style issue: a
-// whitespace-only name passes `required,min=1` and then reaches the database as
-// an empty string. DecodeValid calls Normalize whether T is a value or pointer.
+// normalizer canonicalizes before validation, keeping decode -> normalize ->
+// validate identical for every resource. Doing it after validation lets
+// whitespace-only input pass `required,min=1` and reach the database empty.
 type normalizer interface{ Normalize() }
 
-// DecodeValid decodes the JSON body into T and validates it against its
-// `validate` tags. On failure it writes the error response (413 for
-// oversized bodies, 400 for broken JSON or unknown fields, 422 with
-// per-field messages for validation) and returns ok=false; the caller
-// should just return.
+// DecodeValid decodes and validates the JSON body, writing the error response
+// (413, 400, or 422) and returning ok=false on failure.
 func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	var req T
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
@@ -62,10 +54,8 @@ func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
 		return req, false
 	}
-	// Go's decoder keeps the last value for a duplicate key. That makes
-	// {"email":"victim@example.com","email":"attacker@example.com"} look
-	// successful while a proxy or audit log may have seen the first value.
-	// Reject duplicates before decoding into the DTO.
+	// Go's decoder keeps the last duplicate key, which can disagree with what a
+	// proxy or audit log saw. Reject duplicates before decoding.
 	if err := rejectDuplicateKeys(body); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
 		return req, false
@@ -110,9 +100,8 @@ func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	return req, true
 }
 
-// rejectDuplicateKeys walks the JSON token stream and fails on a repeated key
-// in any object. It intentionally runs before DTO decoding, so the check is
-// independent of the struct shape and covers nested objects too.
+// rejectDuplicateKeys fails on a repeated key in any object before DTO decoding,
+// so it is independent of the struct shape and covers nested objects.
 func rejectDuplicateKeys(body []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if err := scanJSONValue(dec); err != nil {

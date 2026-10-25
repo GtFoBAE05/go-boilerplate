@@ -1,9 +1,5 @@
-// Package config holds the generic helpers every service needs when it loads
-// configuration from the environment: dotenv parsing and DSN redaction.
-//
-// Nothing here knows this application's sections or defaults. Those live in
-// internal/config, because a package under platform/ must stay reusable by
-// another service without dragging Redis/OTel/rate-limit policy along with it.
+// Package config holds generic environment helpers: dotenv parsing and DSN
+// redaction. Application sections live in internal/config.
 package config
 
 import (
@@ -12,14 +8,11 @@ import (
 	"strings"
 )
 
-// keywordPassword matches the password field of a libpq keyword/value DSN
-// ("host=db password=secret sslmode=require"), which url.Parse cannot redact.
+// keywordPassword matches libpq keyword/value passwords, which url.Parse cannot redact.
 var keywordPassword = regexp.MustCompile(`(?i)\bpassword\s*=\s*('(?:[^']|'')*'|\S+)`)
 
-// RedactDSN replaces the password in a DSN with "xxxxx", handling both accepted
-// pgx forms: URL ("postgres://user:pw@host/db") and libpq keyword/value
-// ("host=... password=..."). Unparseable input is reported as redacted rather
-// than echoed, so a malformed DSN carrying a secret still never reaches the logs.
+// RedactDSN replaces the password in URL and libpq keyword/value DSNs. Unparseable
+// input is reported as redacted, never echoed, so a secret cannot reach the logs.
 func RedactDSN(dsn string) string {
 	if dsn == "" {
 		return ""

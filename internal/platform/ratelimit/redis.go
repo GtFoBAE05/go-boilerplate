@@ -8,12 +8,8 @@ import (
 )
 
 // RedisCounter shares a limit across replicas and fails closed when Redis is
-// unavailable.
-//
-// Fail-closed is the deliberate choice: an in-process fallback would keep
-// serving traffic with a budget multiplied by the replica count, which is
-// exactly the failure the shared counter exists to prevent. The caller supplies
-// the error handler that turns this into a 503.
+// unavailable. A local fallback would multiply the budget by the replica count;
+// the caller turns the error into a 503.
 func RedisCounter(client redis.UniversalClient, prefix string) httprate.LimitCounter {
 	return httprateredis.NewCounter(&httprateredis.Config{
 		Client:           client,

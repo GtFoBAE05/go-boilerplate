@@ -7,18 +7,14 @@ import (
 	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
 )
 
-// ServiceConfig identifies this service in logs and telemetry.
-//
-// It is a section rather than two root keys so the variables read SERVICE_NAME
-// and SERVICE_ENV. Bare NAME and ENV are the two most collision-prone names in
-// an unprefixed environment - generic enough that unrelated tooling sets them.
+// ServiceConfig identifies this service in logs and telemetry. It is a section
+// so the variables read SERVICE_NAME and SERVICE_ENV, not collision-prone NAME/ENV.
 type ServiceConfig struct {
 	Name string `mapstructure:"name"`
 	Env  string `mapstructure:"env"`
 }
 
-// Env values accepted in SERVICE_ENV; they gate log formatting defaults and are
-// stamped on every span and log record.
+// Env values accepted in SERVICE_ENV; they gate logging and telemetry defaults.
 const (
 	EnvDevelopment = "development"
 	EnvStaging     = "staging"
@@ -29,41 +25,25 @@ const (
 type ServerConfig struct {
 	Port        int           `mapstructure:"port"`
 	ReadTimeout time.Duration `mapstructure:"read_timeout"`
-	// ReadHeaderTimeout bounds how long a client may take to send the request
-	// line and headers. read_timeout covers that too, but only as part of the
-	// whole-request budget: this is the tighter limit that stops a slowloris
-	// from holding a connection open cheaply. Must not exceed read_timeout,
-	// or it is unreachable.
+	// ReadHeaderTimeout is the tighter slowloris guard; read_timeout covers the
+	// whole request. Must not exceed read_timeout, or it is unreachable.
 	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
 	WriteTimeout      time.Duration `mapstructure:"write_timeout"`
 	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
 	ShutdownTimeout   time.Duration `mapstructure:"shutdown_timeout"`
-	// RequestTimeout bounds each request's context; slow downstream calls
-	// (DB, Redis) abort when it fires and handler.WriteServiceError turns the
-	// resulting context error into a 504. Validated to stay below
-	// write_timeout so that 504 can still reach the client.
+	// RequestTimeout bounds each request's context; it must stay below
+	// write_timeout so a 504 can still reach the client.
 	RequestTimeout time.Duration `mapstructure:"request_timeout"`
-	// DrainDelay is how long /readyz reports 503 before in-flight requests
-	// start draining. It exists for orchestrators that remove a pod from
-	// service asynchronously: without the gap, connections keep arriving at a
-	// server that has already begun shutting down. 0 disables the wait.
+	// DrainDelay is how long /readyz reports 503 before shutdown; 0 disables it.
 	DrainDelay time.Duration `mapstructure:"drain_delay"`
 }
 
-// PprofConfig gates the profiling listener. Disabled means the listener is never
-// created: no socket, no goroutine.
-//
-// It is a listener of its own, bound to loopback, because pprof - raw memory
-// plus an easy way to burn CPU - must never be routable from off-host. Metrics
-// do not share it: they are pushed over OTLP and served by the collector, so
-// there is no scrape endpoint on either listener.
+// PprofConfig gates the loopback-only profiling listener. Disabled means no
+// socket and no goroutine; metrics are pushed over OTLP, not served here.
 type PprofConfig struct {
-	// Enabled turns the listener on. Off by default: this is an attack-surface
-	// decision, not a performance one - pprof samples nothing until an endpoint
-	// is actually requested.
+	// Enabled turns the listener on; off by default is an attack-surface decision.
 	Enabled bool `mapstructure:"enabled"`
-	// Port is the loopback port to bind when Enabled. Ignored otherwise, so it
-	// can stay filled in as documentation of the conventional choice.
+	// Port is the loopback port to bind when Enabled; ignored otherwise.
 	Port int `mapstructure:"port"`
 }
 
@@ -73,16 +53,12 @@ type PostgresConfig struct {
 	MaxConns        int32         `mapstructure:"max_conns"`
 	MinConns        int32         `mapstructure:"min_conns"`
 	MaxConnLifetime time.Duration `mapstructure:"max_conn_lifetime"`
-	// Migrate runs embedded goose migrations at boot. Defaults to false so the
-	// production image is safe without a config file: concurrent replicas all
-	// racing to migrate on rollout is not something to opt into by accident.
-	// .env.example turns it on for local dev.
+	// Migrate runs embedded goose migrations at boot. Off by default so
+	// replicas cannot race on rollout; .env.example enables it for local dev.
 	Migrate bool `mapstructure:"migrate"`
-	// QueryExecMode selects pgx's statement protocol. Leave "cache_statement"
-	// when talking to Postgres directly. Behind a connection pooler in
-	// transaction mode (pgbouncer, RDS Proxy, Supabase's 6543 port) server-side
-	// prepared statements break, and this must be "simple_protocol" or
-	// "exec" - a boilerplate-level footgun worth a knob.
+	// QueryExecMode selects pgx's statement protocol. Behind a transaction-mode
+	// pooler (pgbouncer, RDS Proxy, Supabase 6543) use "exec" or
+	// "simple_protocol"; cache_statement breaks there.
 	QueryExecMode string `mapstructure:"query_exec_mode"`
 }
 
@@ -123,18 +99,15 @@ type RedisConfig struct {
 	// TLSEnabled turns on TLS for the Redis connection. Managed Redis services
 	// normally require it; local development normally does not.
 	TLSEnabled bool `mapstructure:"tls_enabled"`
-	// TLSInsecureSkipVerify disables certificate verification. It is rejected
-	// in production: an unverified connection is not worth the convenience of
-	// skipping certificate validation.
-	TLSInsecureSkipVerify bool `mapstructure:"tls_insecure_skip_verify"`
-	// DialTimeout bounds connection establishment.
-	DialTimeout time.Duration `mapstructure:"dial_timeout"`
-	// ReadTimeout and WriteTimeout bound a single command, not the whole
-	// request. They keep a wedged Redis from consuming the request budget.
+	// TLSInsecureSkipVerify disables certificate verification; production rejects
+	// it because encryption without identity checks is not safe.
+	TLSInsecureSkipVerify bool          `mapstructure:"tls_insecure_skip_verify"`
+	DialTimeout           time.Duration `mapstructure:"dial_timeout"`
+	// ReadTimeout and WriteTimeout bound one command, keeping a wedged Redis from
+	// consuming the whole request budget.
 	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	// PoolSize is the maximum number of socket connections.
-	PoolSize int `mapstructure:"pool_size"`
+	PoolSize     int           `mapstructure:"pool_size"`
 }
 
 // LogValue keeps the Redis password out of logs.
@@ -157,20 +130,9 @@ func (r RedisConfig) LogValue() slog.Value {
 	)
 }
 
-// OTelConfig controls OTLP export of traces and metrics.
-//
-// The keys spell out to the OpenTelemetry SDK's own variable names on purpose.
-// The SDK reads those names from the real environment itself, so matching its
-// spelling and meaning is what keeps an operator's OTEL_EXPORTER_OTLP_ENDPOINT
-// from being silently ignored. Two deliberate deviations:
-//   - OTEL_SERVICE_NAME is not read; SERVICE_NAME owns the identity because the
-//     logger uses it too.
-//   - OTEL_METRIC_EXPORT_INTERVAL is milliseconds, per spec, unlike every other
-//     interval here.
-//
-// Unregistered OTEL_* still reach the exporter from the real environment
-// (_HEADERS, _TIMEOUT, _COMPRESSION) - but not from .env, which is parsed into
-// Viper rather than exported into the process.
+// OTelConfig controls OTLP export and uses the OpenTelemetry SDK's own variable
+// names. OTEL_SERVICE_NAME is the exception: SERVICE_NAME owns the identity
+// because logging uses it too. Metric intervals are milliseconds, per spec.
 type OTelConfig struct {
 	// SDKDisabled turns off both signals; one signal is disabled with
 	// TracesExporter/MetricsExporter = "none".
@@ -236,10 +198,8 @@ const (
 	OTelExporterNone = "none"
 )
 
-// OTelSamplers are the OTEL_TRACES_SAMPLER values this app implements. The
-// spec's jaeger_remote and xray are rejected by validation rather than ignored:
-// a sampler that silently is not the one you asked for is how an incident ends
-// up with no trace to look at.
+// OTelSamplers are the OTEL_TRACES_SAMPLER values this app implements; the
+// spec's jaeger_remote and xray are rejected rather than silently ignored.
 var OTelSamplers = []string{
 	"always_on",
 	"always_off",
@@ -255,21 +215,14 @@ type LogConfig struct {
 	Format string `mapstructure:"format"`
 }
 
-// RateLimitConfig bounds per-client-IP request rate on the API subtree. Probes
-// are never limited (see server.New).
-//
-// Requests and Window describe the policy, not its storage: the counter is
-// shared across replicas when Redis is available, so the cap is global rather
-// than one budget per process.
+// RateLimitConfig bounds per-client-IP request rate on the API subtree; probes
+// are never limited. The counter is shared across replicas when Redis is
+// available, so the cap is global rather than per-process.
 type RateLimitConfig struct {
-	Enabled bool `mapstructure:"enabled"`
-	// Requests is how many requests one IP may make per Window.
-	Requests int `mapstructure:"requests"`
-	// Window is the length of the counting window.
-	Window time.Duration `mapstructure:"window"`
-	// AllowProcessLocal acknowledges that this deployment accepts one budget
-	// per process. In production the limiter is otherwise required to share a
-	// counter through Redis: N replicas with local counters allow N*requests,
-	// which is a silent multiplication, not a degraded mode.
+	Enabled  bool          `mapstructure:"enabled"`
+	Requests int           `mapstructure:"requests"`
+	Window   time.Duration `mapstructure:"window"`
+	// AllowProcessLocal acknowledges one budget per process; production otherwise
+	// requires Redis, because N local counters silently allow N*requests.
 	AllowProcessLocal bool `mapstructure:"allow_process_local"`
 }

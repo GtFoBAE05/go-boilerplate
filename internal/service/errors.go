@@ -1,18 +1,7 @@
-// Package service holds the pieces shared by every resource's business logic:
-// the domain error type and its transport-neutral kinds. Each resource's logic
-// lives in its own subpackage (service/user, ...), exposing an interface plus
-// an unexported implementation so handlers can fake the contract in tests.
-//
-// Domain errors are self-describing: each carries a machine-readable code and
-// a Kind. handler.WriteServiceError maps Kind to HTTP, so adding a resource
-// never means editing the shared handler layer and a future gRPC adapter can
-// map the same errors without a second set of service rules.
-//
-// This package is a thin re-export of platform/errors, not a second error
-// model. It exists so call sites read service.NewError and service.ErrNotFound
-// while the implementation stays in the package that cannot import back into
-// the application. A resource-specific error belongs in that resource's
-// package - do not add it here.
+// Package service holds shared business-logic pieces: the domain error type and
+// its transport-neutral kinds. It re-exports platform/errors so call sites read
+// service.NewError; handler.WriteServiceError maps Kind to HTTP. Resource-
+// specific errors belong in that resource's package, not here.
 package service
 
 import (

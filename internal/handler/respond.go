@@ -1,11 +1,9 @@
-// Package handler holds HTTP plumbing shared by all resource handlers:
-// the response envelope, error mapping, request validation, pagination.
-// Resource handlers live in subpackages (handler/user, ...).
-//
-// Every API response has exactly one shape, enforced here:
+// Package handler holds HTTP plumbing shared by resource handlers: the response
+// envelope, error mapping, validation, and pagination. Every API response has
+// exactly one shape:
 //
 //	success: {"data": ..., "meta": {...}?}
-//	failure: {"error": {"code": "...", "message": "...", "fields": {...}?}}
+//	failure: {"error": {"code", "message", "fields"?, "details"?}}
 package handler
 
 import (
@@ -64,12 +62,9 @@ type errorEnvelope struct {
 	Error errorBody `json:"error"`
 }
 
-// WriteJSON writes v as-is, without the envelope. Reserved for
-// infrastructure endpoints (health probes); API handlers use OK/OKList.
-//
-// v is marshalled into a buffer before any header is written: encoding
-// straight to the ResponseWriter commits a 200 first, so a marshal failure
-// halfway through would ship a truncated body under a success status.
+// WriteJSON writes v as-is for infrastructure endpoints; API handlers use
+// OK/OKList. v is marshalled into a buffer first: encoding straight to the
+// ResponseWriter would commit a 200 before a marshal failure could be reported.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if v == nil {
@@ -105,10 +100,8 @@ func OKList(w http.ResponseWriter, data any, meta Meta) {
 	WriteJSON(w, http.StatusOK, successEnvelope{Data: data, Meta: &meta})
 }
 
-// NoContent writes a 204 with no body. It exists so a handler that returns no
-// data still goes through this file: "every response through respond.go" is an
-// invariant worth keeping literally true, or the one hand-written status is
-// where a future envelope change quietly stops applying.
+// NoContent writes a 204 through this file so every response shares the same
+// header policy.
 func NoContent(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -154,11 +147,9 @@ func statusForKind(kind service.Kind) int {
 	}
 }
 
-// WriteServiceError turns a service-layer error into a response. A
-// *service.Error supplies its own code and Kind, so this function needs no
-// per-resource cases; context errors map to timeouts; anything else is logged
-// and returned as a 500 without leaking internals. It also marks the active
-// span so traces reflect HTTP-level failures.
+// WriteServiceError maps a service error to the envelope. *service.Error carries
+// its own code and Kind; context errors map to timeouts; anything else is logged
+// as a 500 without leaking internals. It also marks the active span.
 func WriteServiceError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error) {
 	span := trace.SpanFromContext(r.Context())
 

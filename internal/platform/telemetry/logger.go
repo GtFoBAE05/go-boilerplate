@@ -29,10 +29,9 @@ func Env(e string) LogOption {
 	return func(o *logOptions) { o.env = e }
 }
 
-// NewLogger builds a slog.Logger at the given level ("debug", "info", "warn",
-// "error"; anything else means info). Every record logged with a *Context
-// method gets trace_id/span_id attached automatically when the context
-// carries an active span.
+// NewLogger builds a slog.Logger at the given level; unknown levels mean info.
+// *Context records automatically carry trace_id/span_id when the context has an
+// active span.
 func NewLogger(level string, opts ...LogOption) *slog.Logger {
 	var o logOptions
 	for _, opt := range opts {

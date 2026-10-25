@@ -1,16 +1,7 @@
-// Package config loads and validates this application's configuration from
-// environment variables (e.g. SERVER_PORT=9090), with a local .env file as a
-// development convenience and production-safe defaults underneath.
-//
-// The section types and their validators live here, next to the defaults that
-// compose them. internal/platform/config is deliberately limited to the
-// generic dotenv and redaction helpers: a package under platform/ must stay
-// usable by any service, and this application's Redis/OTel/rate-limit sections
-// are not.
-//
-// .env.example is the single list of available settings, written exactly as
-// a deployment sets them - there is deliberately one vocabulary, not a
-// config.yaml shadowing the env vars.
+// Package config loads and validates this application's settings from the
+// environment, with .env as a development convenience. Section types and
+// validators live here; internal/platform/config stays generic. .env.example
+// is the canonical key list.
 package config
 
 import (
@@ -39,13 +30,9 @@ type Config struct {
 // directory. It is git-ignored; .env.example documents every key.
 const DotEnvFile = ".env"
 
-// Load builds the configuration from environment variables (e.g. POSTGRES_DSN),
-// falling back to the defaults in setDefaults.
-//
-// A .env file in the working directory is loaded into the environment first as
-// a local development convenience; real environment variables always win, so
-// the precedence is environment > .env > defaults. Deployments set variables
-// directly and ship no file.
+// Load builds configuration from environment variables, falling back to
+// setDefaults. A .env file is layered underneath, so precedence is
+// environment > .env > defaults; deployments ship no file.
 func Load() (*Config, error) {
 	dotEnv, err := platformconfig.ParseDotEnv(DotEnvFile)
 	if err != nil {
@@ -78,12 +65,8 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// validate rejects every value the app would otherwise silently misinterpret.
-// A boilerplate is copied far more often than it is read, so an unset or
-// fat-fingered override must fail at boot rather than degrade in production.
-//
-// Each section's rules live with its type in validate.go. Only the checks that
-// need two sections at once belong here.
+// validate rejects values the app would otherwise silently misinterpret.
+// Section rules live in validate.go; only cross-section checks belong here.
 func (c *Config) validate() error {
 	errs := []error{
 		ValidateService(&c.Service),
@@ -131,14 +114,9 @@ func (c *Config) validate() error {
 	return errors.Join(errs...)
 }
 
-// setDefaults registers every key with its production-safe value; Viper's
-// AutomaticEnv only resolves keys it already knows, so an unregistered key
-// would be invisible even when its variable is set.
-//
-// Production-safe means the value a deployment gets when it ships no file:
-// SERVICE_ENV=production, Redis required (the distributed rate limiter must
-// not silently become per-process), and migrations off. .env.example opts into
-// the convenient development values.
+// setDefaults registers every key with its production-safe value. Viper's
+// AutomaticEnv only resolves registered keys, so an unregistered key is
+// invisible even when its variable is set. .env.example opts into dev values.
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("service.name", "go-boilerplate")
 	v.SetDefault("service.env", EnvProduction)

@@ -1,9 +1,6 @@
 // Package user implements the user business logic: transactional writes and
-// storage-error → domain-error mapping.
-//
-// Consumers import it aliased to avoid clashing with handler/user:
-//
-//	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
+// storage-error mapping. Consumers alias it as usersvc to avoid clashing with
+// handler/user.
 package user
 
 import (

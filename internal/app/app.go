@@ -24,13 +24,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// otelFlushTimeout bounds the trace flush at exit: if the OTLP collector is
-// unreachable, the batch exporter blocks indefinitely and the process never
-// exits.
+// otelFlushTimeout bounds the trace flush at exit so an unreachable collector
+// cannot block shutdown forever.
 const otelFlushTimeout = 5 * time.Second
 
-// Run boots the app with the given configuration and blocks until the process
-// is told to stop. The caller owns loading and validating cfg (see cmd/api).
+// Run boots the app and blocks until shutdown; the caller loads and validates cfg.
 func Run(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -126,23 +124,18 @@ func Run(cfg *config.Config) error {
 
 	<-runCtx.Done()
 
-	// Distinguish the two: only a signal means this instance is being taken out
-	// of rotation deliberately and should drain. A dead listener is already not
-	// serving, so waiting would just delay the error report.
+	// Only a signal means this instance is being taken out of rotation and should
+	// drain; a dead listener is already not serving.
 	signalled := ctx.Err() != nil
 	log.Info("shutdown initiated", "cause", shutdownCause(signalled))
 
-	// Restore default signal handling now that shutdown has begun, so a second
-	// SIGTERM/Ctrl-C kills the process immediately instead of being swallowed
-	// by a handler that no longer acts on it. Without this there is no way to
-	// escape the drain wait.
+	// Restore default signal handling so a second SIGTERM/Ctrl-C can still kill
+	// the process instead of being swallowed during the drain wait.
 	stop()
 
 	if signalled {
-		// Fail readiness first, then keep serving for drain_delay. Kubernetes
-		// removes endpoints asynchronously, so a listener that closes the
-		// instant SIGTERM lands still receives connections — the usual source
-		// of 502s during a rolling deploy.
+		// Fail readiness first, then keep serving for drain_delay: Kubernetes
+		// removes endpoints asynchronously, so closing immediately causes 502s.
 		srv.BeginDrain()
 		if d := cfg.Server.DrainDelay; d > 0 {
 			log.Info("draining: failing readiness before shutdown", "drain_delay", d)
@@ -185,9 +178,8 @@ func shutdownCause(signalled bool) string {
 	return "listener failure"
 }
 
-// setupRedis honors redis.mode: absent in disabled mode, fatal in required
-// mode, best-effort in optional mode. The rate limiter is the consumer today;
-// server.Deps carries the client for any future Redis-backed feature.
+// setupRedis honors redis.mode: absent when disabled, fatal when required,
+// best-effort when optional.
 func setupRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 	*goredis.Client, error, func(), error,
 ) {

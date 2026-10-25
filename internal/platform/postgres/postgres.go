@@ -30,14 +30,10 @@ func MaxConnLifetime(d time.Duration) Option {
 	return func(c *pgxpool.Config) { c.MaxConnLifetime = d }
 }
 
-// QueryExecMode selects pgx's statement protocol by name, as accepted in
-// config: cache_statement (pgx's default), cache_describe, describe_exec, exec,
-// simple_protocol. An unknown name is ignored, leaving pgx's default — config
-// validation is what rejects typos.
-//
-// This exists because server-side prepared statements, which cache_statement
-// relies on, break behind a connection pooler running in transaction mode
-// (pgbouncer, RDS Proxy). Such deployments need exec or simple_protocol.
+// QueryExecMode selects pgx's statement protocol by name. An unknown name is
+// ignored, leaving pgx's default; config validation rejects typos. Transaction-
+// mode poolers (pgbouncer, RDS Proxy) break server-side prepared statements, so
+// those deployments need exec or simple_protocol.
 func QueryExecMode(mode string) Option {
 	return func(c *pgxpool.Config) {
 		m, ok := queryExecModes[mode]

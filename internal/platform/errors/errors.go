@@ -1,14 +1,9 @@
-// Package errors provides the domain error type and the errors shared by every
-// resource. A resource's own failures are declared with NewError in that
-// resource's service package, never added here.
-//
-// A domain error carries a transport-neutral Kind. The HTTP layer maps Kind to
-// a status code, which keeps this package importable by a future gRPC or CLI
-// consumer without dragging net/http along.
+// Package errors provides the domain error type and shared sentinels. A resource
+// declares its own errors in its service package. Kind is transport-neutral, so
+// a future gRPC or CLI consumer can map it without importing net/http.
 package errors
 
-// Kind classifies a domain error. It is the only field the transport layer
-// needs to choose a status code; the Code string is what clients branch on.
+// Kind classifies a domain error for transport mapping; clients branch on Code.
 type Kind string
 
 const (
@@ -22,13 +17,11 @@ const (
 	KindNotFound Kind = "not_found"
 	// KindConflict means the write conflicts with existing state.
 	KindConflict Kind = "conflict"
-	// KindInternal means an unexpected server-side failure. Its detail must
-	// never reach the client.
+	// KindInternal means an unexpected server-side failure; its detail is private.
 	KindInternal Kind = "internal"
 )
 
-// Error is a domain error. It knows what went wrong and how to classify it,
-// but not which HTTP status a particular transport should use.
+// Error is a domain error; it classifies the failure but not its HTTP status.
 type Error struct {
 	// Code is the stable, machine-readable identifier clients branch on.
 	Code string
@@ -36,29 +29,23 @@ type Error struct {
 	Kind Kind
 	// Message is the client-safe text; it must never carry internal detail.
 	Message string
-	// Details carries optional structured context the client acts on (e.g.
-	// the rules blocking a member removal, under "rules"). Package-level
-	// sentinels are shared pointers, so details are attached via WithDetails,
-	// which returns a copy - never by mutating a sentinel.
+	// Details carries optional structured context the client acts on. Shared
+	// sentinels are immutable; attach details via WithDetails, which copies..
 	Details any
 }
 
 func (e *Error) Error() string { return e.Message }
 
-// WithDetails returns a copy of e carrying details. The shared sentinel the
-// method is called on is never mutated, so concurrent requests stay safe:
-//
-//	return ErrOrderLocked.WithDetails(map[string]any{"rules": rules})
+// WithDetails returns a copy carrying details; the shared sentinel is never
+// mutated, so concurrent requests stay safe.
 func (e *Error) WithDetails(details any) *Error {
 	c := *e
 	c.Details = details
 	return &c
 }
 
-// NewError builds a domain error for a resource-specific failure. Declare the
-// result as a package-level var so callers can compare it with errors.Is:
-//
-//	var ErrOrderLocked = service.NewError("ORDER_LOCKED", service.KindConflict, "order is locked")
+// NewError builds a resource-specific domain error. Declare the result as a
+// package-level var so callers can compare it with errors.Is.
 func NewError(code string, kind Kind, message string) *Error {
 	return &Error{Code: code, Kind: kind, Message: message}
 }

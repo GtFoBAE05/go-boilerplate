@@ -1,6 +1,6 @@
-// Package migrations embeds the goose SQL migration files so they travel with
-// the binary. Go's embed cannot reach parent directories, so the embed
-// directive must live here, beside the .sql files it references.
+// Package migrations embeds the goose SQL files so they travel with the binary.
+// Go's embed cannot reach parent directories, so the directive lives here beside
+// the .sql files.
 package migrations
 
 import "embed"

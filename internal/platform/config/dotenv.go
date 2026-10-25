@@ -8,12 +8,9 @@ import (
 )
 
 // ParseDotEnv reads KEY=VALUE lines from path. A missing file returns a nil map
-// and no error: deployments set real environment variables and ship no file.
-//
-// It deliberately does not call os.Setenv. Mutating the process environment
-// would make loading non-idempotent and leak between tests in a shared process;
-// returning a map lets the caller layer the values underneath the real
-// environment instead (see internal/config.Load).
+// and no error. It deliberately does not call os.Setenv: mutating the process
+// environment would make loading non-idempotent and leak between tests. The
+// caller layers the map underneath the real environment instead.
 func ParseDotEnv(path string) (map[string]string, error) {
 	f, err := os.Open(path) // #nosec G304 -- operator-supplied config path, not request input
 	if os.IsNotExist(err) {

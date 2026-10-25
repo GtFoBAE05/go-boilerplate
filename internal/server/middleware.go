@@ -17,9 +17,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// isProbe reports whether path is an orchestrator health probe. Hit every few
-// seconds forever, so the request log and otelhttp both skip it. One function
-// so the two skip lists cannot drift apart.
+// isProbe reports whether path is an orchestrator probe. The request log and
+// otelhttp share this function so their skip lists cannot drift apart.
 func isProbe(path string) bool {
 	return path == "/healthz" || path == "/readyz"
 }
@@ -59,11 +58,9 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// requestTimeout cancels the request context after d. It deliberately does not
-// write a response itself on every path: chi's Timeout middleware writes a bare
-// 504, and WriteServiceError writes the JSON envelope when the handler notices
-// the deadline - two writers on one response. Here the fallback is written only
-// when the handler wrote nothing at all.
+// requestTimeout cancels the request context after d. It writes a fallback 504
+// only when the handler wrote nothing, so WriteServiceError remains the single
+// writer when the handler notices the deadline first.
 func requestTimeout(d time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,10 +143,8 @@ func recoverPanics(log *slog.Logger) func(http.Handler) http.Handler {
 						"stack", string(debug.Stack()),
 						"response_started", ww.Status() != 0,
 					)
-					// Once the handler has committed a status, an error
-					// envelope cannot replace the response: the header is
-					// already on the wire. Abort the connection instead of
-					// appending JSON to a truncated success body.
+					// The header is already on the wire, so an error envelope
+					// cannot replace it. Abort rather than append a truncated body.
 					if ww.Status() != 0 {
 						panic(http.ErrAbortHandler)
 					}
@@ -161,11 +156,9 @@ func recoverPanics(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// routePattern stamps chi's resolved route onto the server span and onto
-// otelhttp's request metrics. Runs after the handler because the pattern is
-// only known post-routing: otelhttp wraps the router from outside and never
-// sees it, so without this every endpoint shares one latency histogram. Its
-// Labeler is the supported way to reach those metrics mid-request.
+// routePattern stamps chi's resolved route onto the server span and otelhttp's
+// metrics. The pattern is only known after routing; without it every endpoint
+// shares one latency histogram.
 func routePattern(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r)

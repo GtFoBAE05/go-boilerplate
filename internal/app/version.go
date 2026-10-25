@@ -2,13 +2,8 @@ package app
 
 import "log/slog"
 
-// Build provenance, overwritten at link time with -ldflags -X (see the
-// Dockerfile and Makefile). The defaults mark an unstamped local build.
-//
-// These live in app rather than a package of their own because app is the only
-// consumer and they encode no decision. runtime/debug.ReadBuildInfo is not the
-// source: .dockerignore excludes .git, so a container build would report no VCS
-// information at all.
+// Build provenance, overwritten with -ldflags -X (see Dockerfile and Makefile).
+// It lives here because app is the only consumer; .dockerignore excludes .git.
 var (
 	// version is a release tag or short commit describing the build.
 	version = "dev"

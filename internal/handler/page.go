@@ -20,19 +20,13 @@ type Page struct {
 	Offset int32
 }
 
-// Meta returns the pagination echo for a list response, so handlers do not
-// each rebuild it. Kept as a conversion in one place: Page and Meta happen to
-// share a shape today, but Meta is the API contract and may gain fields (a
-// total, a next cursor) that Page must not.
+// Meta returns the pagination echo for a list response. Page and Meta share a
+// shape today, but Meta is the API contract and may gain fields Page must not.
 func (p Page) Meta() Meta { return Meta(p) }
 
 // DecodePage reads ?limit and ?offset. An absent parameter takes its default;
-// a malformed or out-of-range one is rejected with 422 and returns ok=false —
-// the caller should just return.
-//
-// Rejecting beats clamping: silently turning ?limit=abc into 20 hands the
-// client a page it did not ask for with no way to notice, and it contradicts
-// DecodeValid's unknown-field strictness on the request-body path.
+// a malformed or out-of-range one is rejected with 422 and returns ok=false.
+// Rejecting beats clamping: silently substituting a default hides the error.
 func DecodePage(w http.ResponseWriter, r *http.Request) (Page, bool) {
 	q := r.URL.Query()
 	fields := map[string]string{}

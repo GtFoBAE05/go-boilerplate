@@ -25,9 +25,8 @@ import (
 	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
 )
 
-// maxHeaderBytes caps the request header size. net/http's default is the same
-// 1 MiB, but stating it here keeps the limit visible next to the timeouts: a
-// template that never mentions it reads as "unbounded".
+// maxHeaderBytes caps request headers; it matches net/http's default but keeps
+// the limit visible next to the timeouts.
 const maxHeaderBytes = 1 << 20
 
 // Server wraps the http.Server with the assembled router and logger.
@@ -37,9 +36,8 @@ type Server struct {
 	health *health.Handler
 }
 
-// keyByRemoteIP buckets rate-limit counters by r.RemoteAddr, the unspoofable
-// TCP peer (see the RealIP note in New). On the rare parse failure we fall
-// back to the raw value so limiting still applies.
+// keyByRemoteIP buckets counters by the unspoofable TCP peer; on a parse failure
+// it falls back to the raw value so limiting still applies.
 func keyByRemoteIP(r *http.Request) (string, error) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -48,11 +46,8 @@ func keyByRemoteIP(r *http.Request) (string, error) {
 	return host, nil
 }
 
-// rateLimitOptions adds the shared Redis counter when one is configured. With
-// no Redis (disabled, or optional and unreachable) the limiter stays
-// per-process: fine for development, but the cap is then one budget per replica
-// rather than a global one. A Redis error during a request fails closed with a
-// 503 instead of silently lifting the limit.
+// rateLimitOptions adds the shared Redis counter when configured; without Redis
+// the limiter is per-process, and a Redis error fails closed with 503.
 func rateLimitOptions(client *goredis.Client, prefix string, log *slog.Logger) []httprate.Option {
 	if client == nil {
 		return nil
@@ -82,19 +77,16 @@ func (p redisPinger) Ping(ctx context.Context) error { return p.rdb.Ping(ctx).Er
 type Deps struct {
 	Users usersvc.UserService
 
-	// Infrastructure handles for health checks. Redis may be nil when
-	// disabled or unreachable in optional mode. Postgres is an interface, not
-	// *pgxpool.Pool, so a test can supply a fake and so a typed-nil pool is
-	// detectable instead of becoming a non-nil Pinger.
+	// Infrastructure handles for health checks. Redis may be nil when disabled
+	// or unreachable in optional mode; Postgres is an interface so tests can fake
+	// it and typed-nil pools are detectable.
 	Postgres health.Pinger
 	Redis    *goredis.Client
-	// RedisRequired makes a failing Redis ping fail /readyz. The caller
-	// derives it from redis.mode; New also treats Redis as required when the
-	// rate limiter is using it, because the limiter fails closed.
+	// RedisRequired makes a failing Redis ping fail /readyz; New also requires it
+	// when the fail-closed rate limiter uses Redis.
 	RedisRequired bool
-	// RedisUnavailable is set when redis.mode=optional and the startup ping
-	// failed. Redis is nil in that case, so this carries the reason /readyz
-	// reports "degraded" instead of omitting the dependency entirely.
+	// RedisUnavailable carries the startup error when optional Redis could not be
+	// reached; Redis is nil then, so /readyz can still report "degraded".
 	RedisUnavailable error
 }
 
@@ -143,10 +135,9 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 	r.Use(routePattern)
 	r.Use(requestLogger(log))
 	r.Use(recoverPanics(log))
-	// Per-request deadline: downstream ctx-aware calls (pgx, redis) abort
-	// when it fires. The middleware only cancels the context and writes a
-	// fallback 504 if the handler wrote nothing; WriteServiceError writes the
-	// envelope when the handler notices first.
+	// Per-request deadline: ctx-aware calls abort when it fires. The middleware
+	// writes a fallback 504 only if the handler wrote nothing; WriteServiceError
+	// writes the envelope when the handler notices first.
 	r.Use(requestTimeout(cfg.Server.RequestTimeout))
 
 	// Unknown routes and wrong methods use the same error envelope as the
@@ -181,15 +172,12 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 	healthHandler := health.NewHandler(required, optional, log)
 	r.Get("/healthz", healthHandler.Liveness)
 	r.Get("/readyz", healthHandler.Readiness)
-	// No /metrics on purpose: metrics are pushed over OTLP (see
-	// platform/telemetry). A scrape endpoint would put route patterns, latency
-	// distributions and pool sizes on an unauthenticated public port.
+	// No /metrics: metrics are pushed over OTLP, so no unauthenticated scrape
+	// endpoint exposes route patterns, latency, or pool sizes.
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Rate limit only the API subtree so health probes — hit constantly by
-		// orchestrators — are never throttled. Requests is the per-IP count
-		// allowed in each window; over it returns 429 through the standard
-		// envelope.
+		// Rate limit only the API subtree so constant health probes are never
+		// throttled; exceeding the per-IP budget returns 429.
 		if cfg.RateLimit.Enabled {
 			// Not httprate's KeyByRealIP: it trusts forwarded headers
 			// (GHSA-9g5q-2w5x-hmxf).
@@ -214,10 +202,9 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 		r.Mount("/users", user.NewHandler(deps.Users, log).Routes())
 	})
 
-	// otelhttp wraps the whole router: creates the server span, extracts
-	// incoming trace context, and records HTTP metrics. The filter drops probes
-	// from both signals — always-fast probe traffic in the same histogram drags
-	// the p99 down and dilutes the error-ratio denominator.
+	// otelhttp creates the server span, extracts trace context, and records HTTP
+	// metrics. The filter drops probes so always-fast traffic does not drag down
+	// the p99 or dilute the error-ratio denominator.
 	root := otelhttp.NewHandler(r, "http.server",
 		otelhttp.WithFilter(func(r *http.Request) bool { return !isProbe(r.URL.Path) }),
 	)
@@ -238,9 +225,8 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 	}, nil
 }
 
-// allowedMethods asks chi which methods match the path. It runs only on a 405,
-// so the extra tree walk is irrelevant; the alternative is an Allow header that
-// hard-codes this template's routes and silently rots.
+// allowedMethods asks chi which methods match the path. It runs only on a 405, so
+// the tree walk is irrelevant; hard-coding Allow would silently rot.
 func allowedMethods(r *http.Request, router chi.Routes) string {
 	var allowed []string
 	for _, method := range []string{

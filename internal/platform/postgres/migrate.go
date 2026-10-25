@@ -13,13 +13,9 @@ import (
 	migrations "github.com/GtFoBAE05/go-boilerplate/db/migrations"
 )
 
-// Migrate applies all pending goose migrations against pool. It runs at boot so
-// a fresh Postgres (empty data dir) reaches the current schema without a
-// separate migration step — right for a boilerplate; production users disable
-// postgres.migrate and run goose from CI instead.
-//
-// goose speaks database/sql, so we open an *sql.DB over the existing pgx pool
-// rather than a second connection, and close that handle (not the pool) after.
+// Migrate applies pending goose migrations against pool. Boot-time migration is
+// a local convenience; production runs goose from CI. goose needs database/sql,
+// so this wraps the pgx pool and closes only that handle, not the pool.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error {
 	goose.SetBaseFS(migrations.FS)
 	if err := goose.SetDialect("postgres"); err != nil {

@@ -8,18 +8,10 @@ import (
 	"time"
 )
 
-// NewPprofServer builds a private pprof server bound to 127.0.0.1:<port>, or
-// returns nil when disabled — in which case no socket is opened and the caller
-// starts no goroutine for it.
-//
-// It gets its own loopback-only listener rather than a path on the public
-// router: pprof exposes raw memory and lets any caller trigger an expensive
-// profile, unlike /metrics which a scraper must reach from off-host. Reach it
-// with `kubectl port-forward` or over SSH, never by widening the bind.
-//
-// Handlers are mounted on a fresh ServeMux, not http.DefaultServeMux: importing
-// net/http/pprof registers them on the default mux, and reusing it would expose
-// pprof anywhere DefaultServeMux is served.
+// NewPprofServer returns a loopback-only pprof listener, or nil when disabled.
+// It uses a fresh ServeMux because importing net/http/pprof registers handlers
+// on http.DefaultServeMux. Reach it with port-forward or SSH, never by widening
+// the bind.
 func NewPprofServer(enabled bool, port int, log *slog.Logger) *http.Server {
 	if !enabled {
 		return nil

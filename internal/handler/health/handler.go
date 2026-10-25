@@ -38,18 +38,12 @@ func NewHandler(required, optional map[string]Pinger, log *slog.Logger) *Handler
 	return &Handler{required: required, optional: optional, log: log}
 }
 
-// BeginDrain makes /readyz fail from now on, without touching liveness.
-//
-// It is called before shutdown starts so an orchestrator can take this
-// instance out of rotation while it is still able to finish in-flight work.
-// Endpoint removal is asynchronous in Kubernetes: shutting down the moment
-// SIGTERM lands means new connections keep arriving at a closing listener,
-// which is the usual source of 502s during a rolling deploy.
+// BeginDrain makes /readyz fail so an orchestrator removes this instance before
+// in-flight work is drained; liveness stays green.
 func (h *Handler) BeginDrain() { h.draining.Store(true) }
 
-// Liveness always returns 200 while the process is up, including while
-// draining: a liveness failure tells the orchestrator to kill the process,
-// which is the opposite of what a graceful shutdown wants.
+// Liveness always returns 200 while the process is up, including during drain:
+// a liveness failure would tell the orchestrator to kill it mid-shutdown.
 func (h *Handler) Liveness(w http.ResponseWriter, _ *http.Request) {
 	handler.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
