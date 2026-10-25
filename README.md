@@ -365,7 +365,7 @@ the orchestrator to kill the process mid-drain. A second signal exits at once.
 ```bash
 make test               # unit tests: go test -race ./... (fast, no Docker)
 make test-integration   # integration suite (-tags integration, needs Docker)
-make lint               # golangci-lint (CI pins the same version)
+make lint               # pinned in the Makefile and CI
 make sqlc               # regenerate internal/repository after editing db/queries/
 make vuln               # govulncheck at the pinned version
 make migrate-new name=x # scaffold a goose migration in db/migrations/

@@ -11,7 +11,7 @@ docker compose up -d        # postgres(5433) redis(6380) jaeger prometheus otel-
 go run ./cmd/api            # run the API (applies goose migrations on boot when .env sets POSTGRES_MIGRATE=true)
 make test                   # unit tests with -race
 make test-integration       # integration tests (needs Docker; -tags integration)
-make lint                   # golangci-lint (CI pins v2.12.2 — keep local in sync)
+make lint                   # golangci-lint v2.12.2 via go run (first run downloads it)
 make sqlc                   # regenerate internal/repository after editing db/queries/
 make sqlc-diff              # same staleness check CI runs
 make migrate-new name=foo   # create a new goose migration in db/migrations/
