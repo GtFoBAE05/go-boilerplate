@@ -5,8 +5,8 @@
 
 Production-ready Go HTTP API boilerplate: clone it, rename the module, copy the
 example resource, and start writing business logic. Community-standard layout
-(thin `cmd/`, private code in `internal/`, one grouped `platform/` for infra —
-enforced by a linter, not by convention).
+(thin `cmd/`, private code in `internal/`, one grouped `internal/platform/` for
+infra — enforced by a linter, not by convention).
 
 ## Features
 
@@ -39,7 +39,7 @@ them generically and never grows a case per resource.
 
 ## Quickstart
 
-Prerequisites: Go 1.27+, Docker.
+Prerequisites: Go 1.27.3+, Docker.
 
 ```bash
 cp .env.example .env      # local settings; without it you get production defaults
@@ -70,7 +70,9 @@ There is no `/metrics` on this port, or on any port — metrics are pushed to a
 collector. See [Observability](#observability).
 
 ```bash
-curl -X POST localhost:8080/api/v1/users -d '{"name":"alice","email":"alice@example.com"}'
+curl -X POST localhost:8080/api/v1/users \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"alice","email":"alice@example.com"}'
 curl localhost:8080/api/v1/users/1
 ```
 

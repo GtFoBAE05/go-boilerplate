@@ -11,7 +11,7 @@ docker compose up -d        # postgres(5433) redis(6380) jaeger prometheus otel-
 go run ./cmd/api            # run the API (applies goose migrations on boot when .env sets POSTGRES_MIGRATE=true)
 make test                   # unit tests with -race
 make test-integration       # integration tests (needs Docker; -tags integration)
-make lint                   # golangci-lint v2.12.2 via go run (first run downloads it)
+make lint                   # golangci-lint v2.15.0 via go run (first run downloads it)
 make sqlc                   # regenerate internal/repository after editing db/queries/
 make sqlc-diff              # same staleness check CI runs
 make migrate-new name=foo   # create a new goose migration in db/migrations/
@@ -21,11 +21,13 @@ make vuln                   # govulncheck at the pinned version
 Run a single test: `go test -run TestName ./internal/service/user/`.
 Integration tests live behind the `integration` build tag so plain `go test ./...` stays Docker-free.
 
+CI runs the same golangci-lint version but builds it from source (`install-mode: goinstall`), because release binaries built with an older Go reject `go.mod` 1.27.
+
 Host ports are 5433 (Postgres) and 6380 (Redis) because native installs occupy 5432/6379 on this machine — never change these mappings.
 
 On Windows with a 32-bit gcc, `-race` fails (`cc1.exe: 64-bit mode not compiled in`); run tests without `-race` there and let CI cover the race detector. The same toolchain breaks `sqlc` unless CGO is off — the Makefile already sets `CGO_ENABLED=0` for it.
 
-Tool versions (goose, sqlc, govulncheck) are pinned as Makefile variables, **not** `go.mod` tool directives: sqlc's dependency tree (wazero, the tidb parser, cel-go) would otherwise be pulled by the Dockerfile's `go mod download` on every image build. Bump them in the Makefile and `.github/workflows/ci.yml` together.
+Tool versions (goose, sqlc, govulncheck, golangci-lint) are pinned as Makefile variables, **not** `go.mod` tool directives: sqlc's dependency tree (wazero, the tidb parser, cel-go) would otherwise be pulled by the Dockerfile's `go mod download` on every image build. Bump them in the Makefile and `.github/workflows/ci.yml` together.
 
 ## Architecture
 

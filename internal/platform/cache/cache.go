@@ -2,7 +2,7 @@
 // contract is codec-agnostic — the Redis implementation happens to encode
 // JSON, but callers must not rely on that. Non-object Redis usecases
 // (counters, locks, rate limits) should use the shared *redis.Client from
-// internal/redis directly instead of going through this package.
+// internal/platform/redis directly instead of going through this package.
 package cache
 
 import (

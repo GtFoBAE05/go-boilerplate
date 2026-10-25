@@ -1,6 +1,6 @@
 // Package redis owns the Redis client lifecycle, analogous to
 // internal/platform/postgres for the database pool. Consumers of the client
-// (cache, rate limiting, sessions, ...) are wired in cmd/.
+// (cache, rate limiting, sessions, ...) are wired in app/.
 package redis
 
 import (
