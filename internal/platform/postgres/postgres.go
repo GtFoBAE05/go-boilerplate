@@ -67,8 +67,9 @@ func NewPool(ctx context.Context, dsn string, opts ...Option) (*pgxpool.Pool, er
 	}
 
 	// Every query becomes a child span of the caller's context, so traces
-	// run handler → service → SQL. Span names carry the trimmed statement.
-	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer(otelpgx.WithTrimSQLInSpanName())
+	// run handler → service → SQL. otelpgx v0.13 names spans after the SQL
+	// operation by default; WithTrimSQLInSpanName is deprecated there.
+	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
