@@ -161,6 +161,8 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
   limiter **fails closed** with `503 RATE_LIMIT_UNAVAILABLE` rather than
   quietly granting each replica its own budget. With `REDIS_MODE=disabled` the
   limiter is per-process — correct for one instance, N×`requests` for N.
+  Production requires a shared counter (`REDIS_MODE=required`) unless
+  `RATELIMIT_ALLOW_PROCESS_LOCAL=true` is set deliberately.
 - **Normalization before validation**: a DTO can implement `Normalize()`;
   `DecodeValid` calls it between decode and validate, so a whitespace-only name
   is rejected instead of being trimmed to `""` after it passes `min=1`.

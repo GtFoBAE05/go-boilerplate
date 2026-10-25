@@ -103,6 +103,18 @@ func (c *Config) validate() error {
 	if c.Pprof.Enabled && c.Pprof.Port == c.Server.Port {
 		errs = append(errs, fmt.Errorf("pprof.port (%d) must differ from server.port", c.Pprof.Port))
 	}
+	// Only the limiter is correctness-critical: a shared counter is what makes
+	// the cap global. Cache may degrade to Postgres reads; limits may not
+	// quietly multiply by the replica count.
+	if c.Service.Env == platformconfig.EnvProduction &&
+		c.RateLimit.Enabled &&
+		!c.RateLimit.AllowProcessLocal &&
+		c.Redis.Mode != platformconfig.RedisModeRequired {
+		errs = append(errs, fmt.Errorf(
+			"production with rate limiting requires redis.mode=required (got %q): "+
+				"set REDIS_MODE=required, or RATELIMIT_ALLOW_PROCESS_LOCAL=true to accept one budget per replica",
+			c.Redis.Mode))
+	}
 
 	return errors.Join(errs...)
 }
@@ -159,4 +171,5 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ratelimit.enabled", true)
 	v.SetDefault("ratelimit.requests", 40)
 	v.SetDefault("ratelimit.window", "1s")
+	v.SetDefault("ratelimit.allow_process_local", false)
 }

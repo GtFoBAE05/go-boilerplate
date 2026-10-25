@@ -289,4 +289,9 @@ type RateLimitConfig struct {
 	Requests int `mapstructure:"requests"`
 	// Window is the length of the counting window.
 	Window time.Duration `mapstructure:"window"`
+	// AllowProcessLocal acknowledges that this deployment accepts one budget
+	// per process. In production the limiter is otherwise required to share a
+	// counter through Redis: N replicas with local counters allow N*requests,
+	// which is a silent multiplication, not a degraded mode.
+	AllowProcessLocal bool `mapstructure:"allow_process_local"`
 }
