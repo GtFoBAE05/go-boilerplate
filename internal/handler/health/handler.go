@@ -3,6 +3,7 @@ package health
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,7 @@ type Pinger interface {
 
 // Handler serves the /healthz and /readyz probes.
 type Handler struct {
+	log *slog.Logger
 	// required dependencies fail readiness (503) when down.
 	required map[string]Pinger
 	// optional dependencies are reported but never fail readiness —
@@ -30,10 +32,10 @@ type Handler struct {
 	draining atomic.Bool
 }
 
-// NewHandler builds the probe handler from required and optional
-// dependencies, keyed by the name reported in the readiness body.
-func NewHandler(required, optional map[string]Pinger) *Handler {
-	return &Handler{required: required, optional: optional}
+// NewHandler builds the probe handler; log is required to keep dependency
+// errors out of readiness responses.
+func NewHandler(required, optional map[string]Pinger, log *slog.Logger) *Handler {
+	return &Handler{required: required, optional: optional, log: log}
 }
 
 // BeginDrain makes /readyz fail from now on, without touching liveness.
@@ -83,7 +85,9 @@ func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 
 	for name, dep := range h.required {
 		if err := dep.Ping(ctx); err != nil {
-			checks[name] = "down: " + err.Error()
+			h.log.WarnContext(r.Context(), "readiness dependency failed",
+				"dependency", name, "required", true, "error", err)
+			checks[name] = "down"
 			status = http.StatusServiceUnavailable
 		} else {
 			checks[name] = "up"
@@ -91,7 +95,9 @@ func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 	}
 	for name, dep := range h.optional {
 		if err := dep.Ping(ctx); err != nil {
-			checks[name] = "degraded: " + err.Error()
+			h.log.WarnContext(r.Context(), "readiness dependency failed",
+				"dependency", name, "required", false, "error", err)
+			checks[name] = "degraded"
 		} else {
 			checks[name] = "up"
 		}

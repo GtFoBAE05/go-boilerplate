@@ -120,7 +120,7 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 			optional["redis"] = redisPinger{rdb: deps.Redis}
 		}
 	}
-	healthHandler := health.NewHandler(required, optional)
+	healthHandler := health.NewHandler(required, optional, log)
 	r.Get("/healthz", healthHandler.Liveness)
 	r.Get("/readyz", healthHandler.Readiness)
 	// No /metrics on purpose: metrics are pushed over OTLP (see
