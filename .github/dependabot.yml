@@ -11,3 +11,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # The compose stack and Dockerfile are part of the quickstart, so a stale
+  # image is a first-run bug. Grouped so the stack is bumped and tested as one
+  # unit rather than five independent PRs that only work in combination.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      infra-images:
+        patterns: ["*"]

@@ -1,12 +1,15 @@
 .PHONY: run build test test-integration lint tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status vuln docker-up docker-down docker-build help
 
 # Tool versions are pinned so local runs and CI can never drift. Bump here and
-# in .github/workflows/ci.yml together. They are kept out of go.mod on purpose:
+# in .github/workflows/ci.yml together; its GOLANGCI_VERSION must match here.
+# They are kept out of go.mod on purpose:
 # sqlc's dependency tree (wazero, the tidb parser, cel-go) would otherwise be
 # downloaded by the Dockerfile's `go mod download` on every image build.
+GOLANGCI_VERSION ?= v2.12.2
 GOOSE_VERSION ?= v3.27.3
 SQLC_VERSION  ?= v1.30.0
 VULN_VERSION  ?= v1.1.4
+LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 GOOSE := go run github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
 SQLC  := CGO_ENABLED=0 go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
 
@@ -35,7 +38,7 @@ test-integration: ## Run all tests including integration ones (needs Docker)
 	go test -race -tags integration ./...
 
 lint: ## Run golangci-lint
-	golangci-lint run
+	$(LINT) run
 
 tidy: ## go mod tidy
 	go mod tidy

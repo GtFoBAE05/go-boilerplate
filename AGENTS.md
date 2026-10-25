@@ -11,7 +11,7 @@ docker compose up -d        # postgres(5433) redis(6380) jaeger prometheus otel-
 go run ./cmd/api            # run the API (applies goose migrations on boot when .env sets POSTGRES_MIGRATE=true)
 make test                   # unit tests with -race
 make test-integration       # integration tests (needs Docker; -tags integration)
-make lint                   # golangci-lint (CI pins v2.12.2 — keep local in sync)
+make lint                   # golangci-lint v2.12.2 via go run (first run downloads it)
 make sqlc                   # regenerate internal/repository after editing db/queries/
 make sqlc-diff              # same staleness check CI runs
 make migrate-new name=foo   # create a new goose migration in db/migrations/
@@ -60,7 +60,7 @@ Adding a resource must not require editing `internal/handler/respond.go` or `int
 
 **Deliberate decisions — do not "fix" these:**
 - No RealIP middleware: forwarded headers are spoofable; rate limiting keys off the TCP peer (`RemoteAddr`). Deployments behind a trusted proxy add their own middleware.
-- Rate-limit storage follows Redis. With a client, the counter is shared and a Redis error **fails closed** (`503 RATE_LIMIT_UNAVAILABLE`) rather than falling back to a per-process budget that would allow N×`ratelimit.requests`. With `REDIS_MODE=disabled` there is no client and the limiter is per-process, which is a development mode, not a silent production fallback.
+- Rate-limit storage follows Redis. With a client, the counter is shared and a Redis error **fails closed** (`503 RATE_LIMIT_UNAVAILABLE`) rather than falling back to a per-process budget that would allow N×`ratelimit.requests`. With `REDIS_MODE=disabled` there is no client and the limiter is per-process, which is a development mode, not a silent production fallback. Production with rate limiting requires `REDIS_MODE=required` unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true` explicitly accepts per-replica budgets; config validation blocks the unsafe optional/disabled combination at boot.
 - No auth, swagger, mock generators, CORS — out of scope for this boilerplate by decision.
 - The app is intentionally NOT in docker-compose (infra only); it runs natively for fast iteration. `Dockerfile` is the production image.
 - goose over golang-migrate; migrations are embedded (`db/migrations/migrations.go`) and auto-applied at boot when `POSTGRES_MIGRATE=true` — which `.env.example` sets for dev only. The default is off, so production migrates from CI unless explicitly told otherwise.

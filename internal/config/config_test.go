@@ -154,6 +154,8 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"min above max conns", func(c *Config) { c.Postgres.MinConns = 99 }, "min_conns"},
 		{"bad exec mode", func(c *Config) { c.Postgres.QueryExecMode = "prepared" }, "query_exec_mode"},
 		{"bad redis mode", func(c *Config) { c.Redis.Mode = "maybe" }, "redis.mode"},
+		{"production optional redis with limiter", func(c *Config) { c.Redis.Mode = platformconfig.RedisModeOptional }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
+		{"production disabled redis with limiter", func(c *Config) { c.Redis.Mode = platformconfig.RedisModeDisabled }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
 		{"bad log level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 		{"bad log format", func(c *Config) { c.Log.Format = "xml" }, "log.format"},
 		{"sampler arg above 1", func(c *Config) { c.OTel.TracesSamplerArg = 1.5 }, "otel.traces_sampler_arg"},
@@ -177,6 +179,44 @@ func TestValidateRejectsBadValues(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("want error mentioning %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestLoadProductionRateLimitRedisGuard(t *testing.T) {
+	tests := []struct {
+		name       string
+		env        string
+		redisMode  string
+		enabled    string
+		allowLocal string
+		wantErr    string
+	}{
+		{"production optional", platformconfig.EnvProduction, string(platformconfig.RedisModeOptional), "true", "false", "RATELIMIT_ALLOW_PROCESS_LOCAL"},
+		{"production optional with explicit local budget", platformconfig.EnvProduction, string(platformconfig.RedisModeOptional), "true", "true", ""},
+		{"production required", platformconfig.EnvProduction, string(platformconfig.RedisModeRequired), "true", "false", ""},
+		{"development optional", platformconfig.EnvDevelopment, string(platformconfig.RedisModeOptional), "true", "false", ""},
+		{"production optional with limiter disabled", platformconfig.EnvProduction, string(platformconfig.RedisModeOptional), "false", "false", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			t.Setenv("SERVICE_ENV", tt.env)
+			t.Setenv("REDIS_MODE", tt.redisMode)
+			t.Setenv("RATELIMIT_ENABLED", tt.enabled)
+			t.Setenv("RATELIMIT_ALLOW_PROCESS_LOCAL", tt.allowLocal)
+
+			_, err := Load()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load() error = %v, want message containing %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -319,7 +359,8 @@ func validConfig() *Config {
 			DSN: "postgres://app:app@localhost:5433/app", MaxConns: 25, MinConns: 2,
 			MaxConnLifetime: time.Hour, QueryExecMode: "cache_statement",
 		},
-		Redis: platformconfig.RedisConfig{Mode: platformconfig.RedisModeOptional, Addr: "localhost:6380"},
+		// This fixture is production-shaped, so its limiter uses shared Redis.
+		Redis: platformconfig.RedisConfig{Mode: platformconfig.RedisModeRequired, Addr: "localhost:6380"},
 		Cache: platformconfig.CacheConfig{DefaultTTL: 5 * time.Minute},
 		OTel: platformconfig.OTelConfig{
 			TracesExporter: platformconfig.OTelExporterOTLP, MetricsExporter: platformconfig.OTelExporterOTLP,
