@@ -159,10 +159,10 @@ Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
   Over the limit → `429 RATE_LIMITED`. With Redis configured the counter is
   shared, so the cap is global across replicas; if Redis fails mid-request the
   limiter **fails closed** with `503 RATE_LIMIT_UNAVAILABLE` rather than
-  quietly granting each replica its own budget. With `REDIS_MODE=disabled` the
-  limiter is per-process — correct for one instance, N×`requests` for N.
+  quietly granting each replica its own budget. With `REDIS_MODE=disabled`,
+  the limiter uses a process-local budget and is intended for development only.
   Production requires a shared counter (`REDIS_MODE=required`) unless
-  `RATELIMIT_ALLOW_PROCESS_LOCAL=true` is set deliberately.
+  `RATELIMIT_ALLOW_PROCESS_LOCAL=true` explicitly accepts per-replica budgets.
 - **Normalization before validation**: a DTO can implement `Normalize()`;
   `DecodeValid` calls it between decode and validate, so a whitespace-only name
   is rejected instead of being trimmed to `""` after it passes `min=1`.
