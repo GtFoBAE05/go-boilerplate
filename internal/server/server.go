@@ -163,6 +163,7 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 		http: &http.Server{
 			Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 			Handler:           root,
+			ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 			ReadTimeout:       cfg.Server.ReadTimeout,
 			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 			WriteTimeout:      cfg.Server.WriteTimeout,

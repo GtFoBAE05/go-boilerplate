@@ -56,6 +56,9 @@ func newTestServerWith(t *testing.T) *Server {
 func TestHTTPServerHeaderLimits(t *testing.T) {
 	s := newTestServerWith(t)
 
+	if s.http.ErrorLog == nil {
+		t.Fatal("want HTTP server errors routed through slog")
+	}
 	if got := s.http.ReadHeaderTimeout; got != 5*time.Second {
 		t.Fatalf("want ReadHeaderTimeout 5s, got %s", got)
 	}
