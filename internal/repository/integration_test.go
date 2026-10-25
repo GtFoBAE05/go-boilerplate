@@ -14,7 +14,6 @@ import (
 	"context"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
 	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
@@ -24,7 +23,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // setupPool starts a throwaway Postgres, migrates it, and returns a live pool.
@@ -37,9 +35,11 @@ func setupPool(t *testing.T) *pgxpool.Pool {
 		tcpostgres.WithDatabase("app"),
 		tcpostgres.WithUsername("app"),
 		tcpostgres.WithPassword("app"),
-		testcontainers.WithWaitStrategy(
-			wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second),
-		),
+		// The module does not apply its readiness wait by default, and the
+		// old WithWaitStrategy override replaced whatever was there. Wait for
+		// the ready log twice plus the host port, or the pool pings a server
+		// that is still starting.
+		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
 		t.Fatalf("start postgres container: %v", err)

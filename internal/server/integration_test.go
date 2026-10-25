@@ -21,7 +21,6 @@ import (
 
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 func setupServer(t *testing.T) http.Handler {
@@ -32,9 +31,11 @@ func setupServer(t *testing.T) http.Handler {
 		tcpostgres.WithDatabase("app"),
 		tcpostgres.WithUsername("app"),
 		tcpostgres.WithPassword("app"),
-		testcontainers.WithWaitStrategy(
-			wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second),
-		),
+		// The module does not apply its readiness wait by default, and the
+		// old WithWaitStrategy override replaced whatever was there. Wait for
+		// the ready log twice plus the host port, or the pool pings a server
+		// that is still starting.
+		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
 		t.Fatalf("start postgres container: %v", err)
