@@ -3,22 +3,61 @@
 [![CI](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml/badge.svg)](https://github.com/GtFoBAE05/go-boilerplate/actions/workflows/ci.yml)
 ![Go Version](https://img.shields.io/badge/go-1.27-00ADD8?logo=go)
 
-Production-ready Go HTTP API boilerplate: clone it, rename the module, copy the
-example resource, and start writing business logic. Community-standard layout
-(thin `cmd/`, private code in `internal/`, one grouped `internal/platform/` for
-infra — enforced by a linter, not by convention).
+Production-ready Go HTTP API template: clone it, rename the module, copy the
+example resource, and start writing business logic.
+
+Go 1.27 · chi · pgx/sqlc · goose · Redis · OpenTelemetry · `log/slog`
+
+## Quickstart
+
+Prerequisites: Go 1.27.3+ and Docker Compose.
+
+```bash
+cp .env.example .env      # local settings; no .env means production defaults
+docker compose up -d      # postgres, redis, jaeger, prometheus, otel-collector
+go run ./cmd/api          # applies migrations when POSTGRES_MIGRATE=true
+```
+
+| Service | URL |
+| --- | --- |
+| API | <http://localhost:8080> |
+| Jaeger | <http://localhost:16686> |
+| Prometheus | <http://localhost:9090> |
+
+Postgres uses host port **5433** and Redis **6380** to avoid native installs.
+`.env.example` enables debug logs, optional Redis, and migrations on boot; the
+built-in defaults are production-safe and reject boot-time migrations in
+production.
+
+```bash
+curl -X POST localhost:8080/api/v1/users \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"alice","email":"alice@example.com"}'
+```
+
+## Using this template
+
+1. Rename the module with `go mod edit -module github.com/you/your-service`, then
+   replace the old import path across the repository.
+2. Update `.golangci.yml` (`module-path`, `local-prefixes`), the three `-ldflags`
+   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, image names, and the CI
+   badge/repository URLs.
+3. Keep the `user` vertical as the reference, or delete it once your first real
+   resource is in place.
 
 ## Features
 
-- **Type-safe SQL** — [sqlc](https://sqlc.dev) generates Go from raw SQL; no ORM, no reflection
-- **Versioned migrations** — [goose](https://github.com/pressly/goose) files embedded in the binary, applied at boot (or from CI in prod)
-- **Redis-backed rate limiting** — optional by config: disabled / degrade-gracefully / required
-- **Full observability** — OTel traces and metrics pushed over OTLP (handler → service → SQL/Redis), trace-correlated `slog` logs
-- **Hardened HTTP** — single response envelope, per-IP rate limiting, request and header deadlines, 1 MiB body cap, strict JSON validation (query params included)
-- **Loopback-only pprof** — profiling on its own private port, off by default, never on the public API
-- **Validated config** — every knob checked at boot, all errors reported at once, secrets redacted in logs
-- **Guardrail CI** — lint, `gosec`, race tests, testcontainers integration suite, pinned `govulncheck`, sqlc drift check, `promtool check rules`, image build, Dependabot
-- **Zero-downtime shutdown** — readiness drain before the listener closes, then bounded HTTP drain and OTel flush
+- **Type-safe SQL** — sqlc generates Go from raw SQL; no ORM or reflection.
+- **Migrations** — goose files embedded in the binary; production runs them from
+  a deploy job.
+- **Redis rate limiting** — `REDIS_MODE=disabled|optional|required`; production
+  uses a shared counter.
+- **Observability** — OpenTelemetry traces and metrics over OTLP, plus
+  trace-correlated `slog` logs.
+- **Hardened HTTP** — strict JSON, 1 MiB body cap, deadlines, per-IP limits, and
+  one response envelope.
+- **Guardrail CI** — lint, `gosec`, race tests, integration tests,
+  `govulncheck`, sqlc drift, `promtool`, and a Docker smoke test.
 
 ## Architecture
 
@@ -32,430 +71,193 @@ flowchart LR
     Q --> P[(Postgres)]
 ```
 
-Every layer owns one job: handlers never touch the database, services never
-touch HTTP, repositories never contain business rules. Domain errors carry their
-own kind and code (`service.Error`), so `internal/handler/respond.go` maps
-`Kind` to a status generically and never grows a case per resource.
+The graph is flat: **handler → service → repository**. Handlers never touch the
+database, services never touch HTTP, and services never call another service.
+Domain errors carry a `Kind` and `Code`, so the HTTP layer maps them generically.
 
-## Quickstart
-
-Prerequisites: Go 1.27.3+, Docker.
-
-```bash
-cp .env.example .env      # local settings; without it you get production defaults
-docker compose up -d      # postgres + redis + jaeger + prometheus + otel-collector
-go run ./cmd/api          # or: make run — applies goose migrations at boot
+```text
+cmd/api/              entry point
+internal/app/         lifecycle + dependency wiring
+internal/config/      config, defaults, validation
+internal/platform/    generic infra: postgres, redis, ratelimit, telemetry, errors
+internal/repository/  sqlc output + transaction store
+internal/service/     use-case services (user is the example)
+internal/handler/     HTTP plumbing + resource handlers
+internal/server/      router, middleware, http.Server, pprof
+db/                   migrations and sqlc queries
+deploy/               collector, Jaeger, Prometheus, alert rules
 ```
 
-The `.env` step matters: boot-time migrations are **off** by default (and
-rejected when `SERVICE_ENV=production`, because replicas racing to migrate is not
-a mode to opt into by accident). `.env.example` turns them on for local
-development.
+`internal/platform/` may not import application code; `depguard` enforces it.
+Only the composition layer may import `internal/config`.
 
-Postgres binds host port **5433** and Redis **6380** (not the defaults) so they
-never collide with natively installed instances.
+## API
 
-### Endpoints
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/v1/users` | Create user (409 on duplicate email) |
+| GET | `/api/v1/users/{id}` | Get user |
+| GET | `/api/v1/users` | List users (`?limit=1..100&offset=`) |
+| PATCH | `/api/v1/users/{id}` | Partial update |
+| DELETE | `/api/v1/users/{id}` | Delete user (404 if missing) |
+| GET | `/healthz` | Liveness probe |
+| GET | `/readyz` | Readiness: Postgres, plus Redis when configured |
 
-| Method | Path                 | Description                              |
-| ------ | -------------------- | ---------------------------------------- |
-| POST   | `/api/v1/users`      | Create user (409 on duplicate email)     |
-| GET    | `/api/v1/users/{id}` | Get user                                 |
-| GET    | `/api/v1/users`      | List users (`?limit=1..100&offset=`)     |
-| PATCH  | `/api/v1/users/{id}` | Partial update (name and/or email)       |
-| DELETE | `/api/v1/users/{id}` | Delete user (404 if it never existed)    |
-| GET    | `/healthz`           | Liveness probe                           |
-| GET    | `/readyz`            | Readiness (pings postgres + redis)       |
-
-There is no `/metrics` on this port, or on any port — metrics are pushed to a
-collector. See [Observability](#observability).
-
-```bash
-curl -X POST localhost:8080/api/v1/users \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"alice","email":"alice@example.com"}'
-curl localhost:8080/api/v1/users/1
-```
-
-## Stack
-
-| Concern       | Choice                                                                 |
-| ------------- | ---------------------------------------------------------------------- |
-| HTTP router   | [chi](https://github.com/go-chi/chi) (stdlib-compatible)               |
-| Database      | PostgreSQL via [pgx/v5](https://github.com/jackc/pgx) connection pool  |
-| Query layer   | [sqlc](https://sqlc.dev) — type-safe Go generated from SQL             |
-| Migrations    | [goose](https://github.com/pressly/goose) — embedded, applied at boot  |
-| Redis         | [go-redis/v9](https://github.com/redis/go-redis) — shared rate-limit counter |
-| Config        | [Viper](https://github.com/spf13/viper) — env vars + `.env` for dev, validated at boot |
-| Logging       | stdlib `log/slog`, JSON in prod, trace-ID correlated                   |
-| Tracing       | OpenTelemetry → OTLP/gRPC (Jaeger, Tempo, any collector)               |
-| Metrics       | OpenTelemetry → OTLP/gRPC push to a collector (no scrape endpoint)     |
-
-## Layout
-
-```
-cmd/api/              Entry point: loads config, calls app.Run(cfg)
-internal/
-  app/                Lifecycle (app.go, stable) + DI wiring (di.go, grows per resource)
-                      version.go holds -ldflags build provenance
-  config/             This app's root Config, section types, validators, Load, defaults
-  platform/           Generic infra — know nothing about this app, enforced by depguard
-    config/           .env parser + DSN redaction (no app-specific sections)
-    errors/           Domain error type and transport-neutral Kind
-    postgres/         pgxpool construction + goose migration runner
-    redis/            Redis client lifecycle (TLS, timeouts, pool options)
-    ratelimit/        Shared httprate counter backed by Redis
-    telemetry/        slog setup + OTel tracer/meter providers
-  repository/         sqlc-generated queries (run `make sqlc`) + hand-written Store (tx wrapper)
-  service/            Re-export of platform/errors under the name services use
-    user/             User business logic: service.go, model.go
-  handler/            Shared HTTP plumbing: respond, validate, page
-    health/           Liveness/readiness probes (readiness drains on shutdown)
-    user/             /users resource: handler.go, request.go, response.go, routes.go
-  server/             Router, middleware, http.Server, private pprof listener
-db/
-  migrations/         goose SQL migrations (embedded, applied at boot)
-  queries/            sqlc query sources
-deploy/               OTel collector, Jaeger, Prometheus, and alert rule configs
-docs/                 runbook.md and slo.md (the operational contract)
-```
-
-`internal/platform/` is the one grouped directory, and it earns the nesting by
-having a rule a linter can check: **nothing under it may import
-`github.com/GtFoBAE05/go-boilerplate/internal`**. A `depguard` rule fails the build otherwise. That is
-what keeps infra constructible from a test with no `config.Config` — and what
-stops `platform/` from decaying into the `util/`-style dumping ground these
-directories usually become. A second rule denies `internal/config` to
-`handler/`, `service/` and `repository/`: only the composition root reads config.
-
-## API behavior
+There is no `/metrics` endpoint; metrics are pushed to the collector.
 
 ### Response envelope
 
-Every API response has exactly one shape, enforced centrally in
-`internal/handler/respond.go` — resource handlers never touch the encoder:
+Every API response has one shape. Health probes skip it.
 
 ```jsonc
-// success                              // failure
-{"data": {...}}                         {"error": {"code": "NOT_FOUND", "message": "..."}}
-{"data": [...], "meta": {"limit": 20,   {"error": {"code": "VALIDATION_FAILED", "message": "...",
-           "offset": 0}}                           "fields": {"email": "is required"},
-                                                    "details": {"rules": ["..."]}}}
+// success
+{"data": {"id": 1, "name": "alice"}}
+
+// list
+{"data": [...], "meta": {"limit": 20, "offset": 0}}
+
+// failure
+{"error": {"code": "VALIDATION_FAILED", "message": "...", "fields": {"email": "is required"}}}
 ```
 
-Clients branch on `error.code` (machine-readable), never on `message`.
-`details` is optional structured context the client can act on (which rules
-blocked an operation, say); it is set with `ErrX.WithDetails(...)`, never by
-parsing the message text.
-Health probes (`/healthz`, `/readyz`) intentionally skip the envelope.
+Clients branch on `error.code`, never on `message`. Optional `details` carries
+structured context.
 
 ### Request guardrails
 
-- **Validation**: DTOs carry [go-playground/validator](https://github.com/go-playground/validator)
-  tags; failures return 422 with per-field messages. Unknown JSON fields and
-  duplicate keys are rejected (a duplicate key would otherwise silently keep
-  the last value). Bodies over 1 MiB return 413. The service repeats the
-  business invariants before touching the database, and the schema enforces
-  them again (`CHECK` constraints, a `lower(email)` unique index).
-- **Pagination**: `?limit`/`?offset` are validated, not clamped — a malformed or
-  out-of-range value returns 422 naming the field, rather than silently serving
-  a page the client never asked for.
-- **Rate limiting**: the `/api/v1` subtree is limited per client IP via
-  [httprate](https://github.com/go-chi/httprate); probes are never limited.
-  Over the limit → `429 RATE_LIMITED`. With Redis configured the counter is
-  shared, so the cap is global across replicas; if Redis fails mid-request the
-  limiter **fails closed** with `503 RATE_LIMIT_UNAVAILABLE` rather than
-  quietly granting each replica its own budget. With `REDIS_MODE=disabled`,
-  the limiter uses a process-local budget and is intended for development only.
-  Production requires a shared counter (`REDIS_MODE=required`) unless
-  `RATELIMIT_ALLOW_PROCESS_LOCAL=true` explicitly accepts per-replica budgets.
-- **Normalization before validation**: a DTO can implement `Normalize()`;
-  `DecodeValid` calls it between decode and validate, so a whitespace-only name
-  is rejected instead of being trimmed to `""` after it passes `min=1`.
-- **Header deadline**: `server.read_header_timeout` (default 5s, validated
-  `<= read_timeout`) is the slowloris guard; headers are capped at 1 MiB.
-- **Timeouts**: every request gets a context deadline (`server.request_timeout`);
-  downstream pgx/redis calls abort when it fires and the client gets a `504`
-  with the `TIMEOUT` code. The timeout middleware only cancels the context; it
-  writes a fallback envelope only if the handler wrote nothing, so there is
-  never a second response on the wire. A client that disconnects gets no body
-  written.
-- **Error responses** carry `Cache-Control: no-store`; every JSON response
-  carries `X-Content-Type-Options: nosniff`. A 405 includes `Allow`, a 429
-  includes `Retry-After`, and a 503 from the limiter includes `Retry-After`.
-- **Request IDs** supplied by a client are accepted only when short and
-  alphanumeric (plus `-_.`); anything else is replaced, so a hostile header
-  cannot inject arbitrary text into every log line.
+| Area | Behavior |
+| --- | --- |
+| Body | 1 MiB cap; unknown/duplicate JSON fields rejected; validation failures return 422 |
+| Pagination | `limit` 1–100, non-negative `offset`; malformed values return 422 |
+| Rate limit | Per client IP; 429 over limit; Redis failure fails closed with 503 |
+| Timeouts | `server.request_timeout` aborts downstream work and returns 504 `TIMEOUT` |
+| Headers | `Cache-Control: no-store`, `nosniff`, `Allow` on 405, `Retry-After` on 429/503 |
+| Request ID | Short alphanumeric IDs (plus `-_.`) are kept; others are replaced |
+
+Business rules are validated in the handler, repeated in the service, and
+enforced by the database (`CHECK`, `lower(email)` unique index).
 
 ### Error codes
 
-`error.code` is the stable contract. Transport-level codes (`BAD_REQUEST`,
-`VALIDATION_FAILED`, `NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`,
-`RATE_LIMITED`, `RATE_LIMIT_UNAVAILABLE`, `TIMEOUT`, `INTERNAL`) live in
-`internal/handler`. Domain codes
-live on the error itself:
+Transport codes live in `internal/handler`: `BAD_REQUEST`, `VALIDATION_FAILED`,
+`NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`,
+`RATE_LIMIT_UNAVAILABLE`, `TIMEOUT`, `INTERNAL`.
+
+Domain codes live with the error:
 
 ```go
-// in your resource's service package — no change to the handler layer
 var ErrOrderLocked = service.NewError("ORDER_LOCKED", service.KindConflict, "order is locked")
 ```
 
-`WriteServiceError` finds the mapping with `errors.As`, maps the error's `Kind`
-to an HTTP status in one place, so wrapping with `%w` preserves it and adding a
-resource never touches shared code.
+`WriteServiceError` maps `Kind` to a status and preserves `%w` wrapping.
 
 ## Configuration
 
-Everything is configured through environment variables. `.env.example` lists
-every one of them, with comments:
+Configuration is environment-only: **environment > `.env` > built-in default**.
+`.env.example` is the source of truth. Every key is registered, defaulted, and
+validated at boot; all errors are reported together.
+
+Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=required`,
+`POSTGRES_MIGRATE=false`, JSON logs at `info`, `PPROF_ENABLED=false`.
+`.env.example` is the local-development opt-in.
+
+Gotchas:
+
+- Kubernetes injects variables such as `POSTGRES_PORT`; current keys use
+  `POSTGRES_DSN` and `REDIS_ADDR` to avoid collisions.
+- `OTEL_*` uses the SDK's own names and semantics. `OTEL_METRIC_EXPORT_INTERVAL`
+  is milliseconds, the OTLP endpoint requires a scheme, and `OTEL_SERVICE_NAME`
+  is not read because `SERVICE_NAME` owns identity.
+- Behind pgbouncer or RDS Proxy, set `POSTGRES_QUERY_EXEC_MODE=exec` or
+  `simple_protocol`; `cache_statement` needs server-side prepared statements.
+
+Dependencies:
+
+- **Postgres** is required; an unreachable database at startup is fatal.
+- **Redis** is `disabled`, `optional`, or `required`. Optional Redis that is
+  unreachable reports `degraded` on `/readyz` but stays 200.
+- Production rate limiting needs a shared counter. Production with optional or
+  disabled Redis fails boot unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true`.
+- Production migrations belong to the deploy pipeline, not the app. Redis TLS
+  verification is on by default and skipping it is rejected in production.
+
+## Database and migrations
+
+Goose SQL lives in `db/migrations/`, is embedded in the binary, and is applied at
+boot only when `POSTGRES_MIGRATE=true`. Production rejects that setting.
 
 ```bash
-cp .env.example .env      # local development; .env is git-ignored
+make migrate-up
+make migrate-status
+make migrate-down       # roll back one migration
+
+# production, from a dedicated job
+DB_DSN='postgres://...' make migrate-up
 ```
 
-**Precedence: environment variable > `.env` > built-in default.** The built-in
-defaults are the production-safe set (`SERVICE_ENV=production`,
-`REDIS_MODE=required`, `POSTGRES_MIGRATE=false`, JSON logs at info,
-`PPROF_ENABLED=false`), so a container that ships no file and sets only what it
-needs is already sane. `.env.example` is what opts *local development* into the
-convenient values (development env, optional Redis, debug text logs,
-migrate-on-boot).
-
-There is deliberately **one vocabulary**. An earlier revision had a `config.yaml`
-of dotted keys that production never read — every knob had two spellings and the
-env names were documented nowhere. `.env` is parsed into a map and layered in as
-defaults (never via `os.Setenv`, which would make `Load` non-idempotent), so a
-real environment variable still wins for free.
-
-Names are **unprefixed**, which means they share a namespace with everything else
-in the environment. Two sections are named deliberately as a result, in opposite
-directions, and should stay that way:
-
-- **`SERVICE_NAME` / `SERVICE_ENV`** rather than bare `NAME` / `ENV`, which are
-  generic enough that unrelated tooling sets them.
-- **`OTEL_*`, using the OpenTelemetry SDK's own names with the SDK's own
-  meaning** — `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_SAMPLER`,
-  `OTEL_SDK_DISABLED`. Inventing a private spelling would mean an operator who
-  sets the real variable from memory is silently ignored. The price is owing the
-  spec's semantics: `OTEL_METRIC_EXPORT_INTERVAL` is **milliseconds**, not a Go
-  duration, and `OTEL_EXPORTER_OTLP_ENDPOINT` **requires a scheme** because that
-  is what selects TLS. Both are validated at boot. `OTEL_SERVICE_NAME` is the
-  one exception, documented in `.env.example`: `SERVICE_NAME` owns the service
-  identity because the logger uses it too.
-
-When adding a key, check the resulting name against what your platform injects.
-Kubernetes sets `<SERVICE>_PORT` and `<SERVICE>_SERVICE_HOST` for every Service in
-the namespace (`enableServiceLinks`, on by default), so a key spelling out to
-`POSTGRES_PORT` or `REDIS_PORT` would be silently overwritten with something like
-`tcp://10.96.0.1:5432`. The current names (`POSTGRES_DSN`, `REDIS_ADDR`, …) avoid
-that collision.
-
-Adding a knob: register it in `setDefaults` with the value production wants —
-registration is mandatory, since Viper's `AutomaticEnv` only resolves keys it
-already knows — validate it, then add the dev value to `.env.example`. Two CI
-tests keep that file honest: it must produce a valid config, and every key in it
-must be one the app actually reads.
-
-Every key is **validated at boot** and all problems are reported together, so a
-bad override fails fast with the full list instead of degrading silently:
-port ranges, enum values (`service.env`, `log.level`, `log.format`,
-`postgres.query_exec_mode`, `redis.mode`), `otel.traces_sampler_arg` ∈ [0,1],
-and cross-field rules — `request_timeout < write_timeout` (so the 504 can still
-be written), `shutdown_timeout >= request_timeout` (so shutdown outlasts one
-in-flight request) and `read_header_timeout <= read_timeout` (so the slowloris
-guard can actually fire). Config structs holding secrets implement `slog.LogValuer`,
-so logging a config can't leak a DSN password.
-
-Behind a transaction-mode connection pooler (pgbouncer, RDS Proxy), set
-`postgres.query_exec_mode` to `exec` or `simple_protocol` — pgx's default
-prepared-statement cache breaks there.
-
-### Dependency policy
-
-- **Postgres is a hard dependency**: unreachable at startup → the process
-  exits (fail-fast, let the orchestrator restart it).
-- **Redis is configurable**, controlled by `redis.mode`:
-  - `disabled` — no Redis and no Redis-backed features.
-  - `optional` — log a warning and run without Redis-backed features when
-    unreachable; `/readyz` reports Redis as `degraded` but stays 200.
-  - `required` (default) — unreachable Redis is fatal at startup.
-- **Production rate limiting requires a shared counter.** The limiter is on by
-  default, so `SERVICE_ENV=production` with `REDIS_MODE=optional` or `disabled`
-  fails boot unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true` explicitly accepts one
-  budget per replica. This is a multiplication of the limit, not a degraded
-  mode.
-- **Production rejects boot-time migrations.** `POSTGRES_MIGRATE=true` with
-  `SERVICE_ENV=production` fails boot; CI or a dedicated job owns migrations.
-- **Redis TLS is verifiable.** Managed Redis normally requires TLS; skipping
-  certificate verification is available for a self-signed development endpoint
-  and is rejected in production.
+The database role needs DDL permissions. sqlc reads the migrations as its
+schema, so generated code stays in sync.
 
 ## Observability
 
-- **Traces**: Jaeger UI at <http://localhost:16686> — spans run
-  handler → service → SQL/Redis, correlated with logs via `trace_id`.
-- **Metrics**: Prometheus at <http://localhost:9090>, scraping the collector at
-  `:8889` — the app pushes there over OTLP.
-- **Profiling**: pprof on a private loopback listener, off by default — set
-  `PPROF_ENABLED=true`, then
-  `go tool pprof http://localhost:6060/debug/pprof/profile`. While disabled
-  nothing is created: no socket, no goroutine.
+- **Traces**: Jaeger at <http://localhost:16686>; logs carry `trace_id` and
+  `span_id`.
+- **Metrics**: Prometheus at <http://localhost:9090>, scraping the collector.
+  The app pushes over OTLP and serves no `/metrics`.
+- **Profiling**: pprof on a private loopback listener, off by default. Enable it
+  with `PPROF_ENABLED=true`, then run
+  `go tool pprof http://localhost:6060/debug/pprof/profile`.
 
-Both signals leave the process the same way — an OTLP/gRPC push to the
-collector, which fans traces out to Jaeger and re-exposes metrics for Prometheus
-to scrape. **The app serves no `/metrics`, on any port.** A test asserts it stays
-that way.
+Push metrics have no `up` signal: a dead app and a dead collector look the same.
+`deploy/rules.yml` uses `AppMetricsMissing` and `CollectorDown` together.
 
-That is the deliberate trade:
-
-| | pull (what this used to be) | push (what it is) |
+| Series | Source | Answers |
 | --- | --- | --- |
-| exposure | unauthenticated endpoint on the public port, leaking route patterns and pool sizes | one outbound connection, nothing listening |
-| liveness | `up` for free — Prometheus knows a target it cannot reach | no `up`; absence of series is the only signal |
-| failure mode | collector dies, metrics keep accumulating locally | collector dies, metrics are gone |
+| `http_server_request_duration_seconds` | otelhttp | rate, errors, latency |
+| `pgxpool_*` | `otelpgx.RecordStats` | pool saturation |
+| `db_client_connections_*` | redisotel | Redis pool |
+| `go_*` | runtime instrumentation | goroutines, heap, GC |
+| `target_info` | OTel resource | build provenance |
 
-Losing `up` is the part that costs something, and `deploy/rules.yml` handles it
-explicitly rather than pretending otherwise: `AppMetricsMissing` fires on
-`absent(go_goroutine_count)`, and `CollectorDown` — the collector *is* still
-scraped — is what distinguishes a dead app from a dead pipeline. In Kubernetes,
-restarting a wedged process is the liveness probe's job anyway, not an alert's.
-
-pprof remains on its own private listener, off by default, `127.0.0.1` only. It
-has no bind-host option on purpose: reach it with `kubectl port-forward`, never
-by widening the bind.
-
-### What gets exported
-
-Nothing here is hand-rolled — every series comes from an instrumentation library
-wired in `internal/platform`, so a new resource inherits all of it for free.
-Names below are after the collector's OTLP-to-Prometheus translation.
-
-| Series | From | Answers |
-| --- | --- | --- |
-| `http_server_request_duration_seconds{http_route,...}` | otelhttp | rate, errors, latency (RED) |
-| `pgxpool_acquired_connections`, `pgxpool_max_connections`, `pgxpool_empty_acquire_total`, ... | `otelpgx.RecordStats` | pool saturation |
-| `db_client_connections_usage{db_system="redis"}`, ... | `redisotel.InstrumentMetrics` | Redis client pool |
-| `go_goroutine_count`, `go_memory_used_bytes`, ... | `contrib/instrumentation/runtime` | goroutines, heap, GC |
-| `target_info{service_version,vcs_ref_head_revision}` | OTel resource, stamped from `-ldflags` | which build a series came from |
-
-Runtime metrics are started explicitly in `telemetry.Setup`. Under a scrape
-endpoint the Prometheus client library contributes its Go collector by default;
-pushing over OTLP nothing does, and goroutine count and heap size would simply
-not exist.
-
-Pool saturation is the one worth internalising: an exhausted pool never surfaces
-as an error, only as latency *inside* the acquire, so `http_*` alone cannot tell
-"the database is slow" from "we ran out of connections to it".
-
-Two labels are load-bearing and neither is free under push:
-
-- **`http_route`** — otelhttp wraps the router from the outside and never sees
-  chi's pattern. The `routePattern` middleware feeds it back through otelhttp's
-  Labeler after routing; without it every endpoint shares one histogram.
-  Unmatched paths are left unlabelled on purpose, so a scanner walking random
-  URLs cannot mint a series per path.
-- **`instance`** — scraping derived it from the target address. Pushing, only
-  the process can say who it is, so `telemetry.Setup` stamps
-  `service.instance.id` from the hostname. Without it every replica collapses
-  onto one series and per-pod problems average away. `prometheus.yml` needs
-  `honor_labels: true` or the scrape overwrites it with the collector's identity.
-
-`target_info` is what turns a regression into a deploy. Join it in PromQL:
-
-```promql
-job:http_request_duration_seconds:p99_5m
-  * on(instance) group_left(service_version) target_info
-```
-
-`deploy/rules.yml` ships the recording and alerting rules for exactly these
-series — error ratio, p99, pool utilisation, liveness, plus a
-`PostgresPoolStarved` leading indicator. Prometheus loads it from the compose
-stack. Recording rules exist so a dashboard panel and its alert evaluate the
-*same* expression; validate edits with
-`promtool check rules deploy/rules.yml` (CI does this on every change). Every
-alert links to [docs/runbook.md](docs/runbook.md), and the starting targets are
-in [docs/slo.md](docs/slo.md).
-
-**Adding a metric of your own:** build the instrument once in the service
-constructor (never per request), keep the attribute set bounded — an id, email
-or `trace_id` as a label is one time series per value and will take down the
-collector — and first check the metric is not already derivable from
-`http_server_*`, which sees every request the API answers.
-
-### Shutdown
-
-On SIGTERM the app fails `/readyz` first, keeps serving for
-`server.drain_delay`, and only then closes the listener. Kubernetes removes
-endpoints asynchronously, so closing immediately is the usual cause of 502s
-during a rolling deploy. Liveness stays 200 throughout — failing it would tell
-the orchestrator to kill the process mid-drain. A second signal exits at once.
+Keep labels bounded: `http_route` is the chi pattern, `instance` is the replica.
+Never label with a user id, email, or `trace_id`.
 
 ## Development
 
 ```bash
-make test               # unit tests: go test -race ./... (fast, no Docker)
-make test-integration   # integration suite (-tags integration, needs Docker)
-make lint               # pinned in the Makefile and CI
-make gosec              # gosec, pinned in the Makefile and CI
-make sqlc               # regenerate internal/repository after editing db/queries/
-make vuln               # govulncheck at the pinned version
-make migrate-new name=x # scaffold a goose migration in db/migrations/
-make migrate-up         # apply migrations to the local db
-make build              # local binary with version/commit stamped in
-make docker-build       # distroless production image, provenance included
+make test               # go test -race ./...
+make test-integration   # testcontainers suite
+make lint               # golangci-lint
+make gosec              # security scan
+make sqlc               # regenerate internal/repository
+make sqlc-diff          # fail if generated code is stale
+make vuln               # govulncheck
+make migrate-new name=x # scaffold a migration
+make build              # local binary with provenance
+make docker-build       # production image
 ```
 
-Tool versions (goose, sqlc, govulncheck, golangci-lint, gosec) are pinned as Makefile
-variables so local runs and CI can't drift. They stay out of `go.mod` on purpose:
-sqlc's dependency tree would otherwise be downloaded by the Dockerfile's
-`go mod download` on every image build.
-
-The integration suite spins a throwaway `postgres:16-alpine` via
-[testcontainers](https://github.com/testcontainers/testcontainers-go), applies
-the goose migrations (guarding them too), and exercises the repository. See
-`internal/repository/integration_test.go` — it is the template for new
-resources. The alert rules are validated with `promtool` in CI; run the same
-check locally with
-`docker run --rm --entrypoint promtool -v "$PWD/deploy:/deploy:ro" prom/prometheus:v3.14.0 check rules /deploy/rules.yml`.
-
-### Migrations
-
-Schema changes are goose SQL files under `db/migrations/` (`-- +goose Up` /
-`-- +goose Down` in one file), embedded in the binary and applied at boot when
-`postgres.migrate` is true. It is **off by default**, and config validation
-**rejects it when `SERVICE_ENV=production`**: replicas racing to migrate on
-rollout is not something to opt into by accident. `.env.example` turns it on for
-local dev. sqlc reads the same migration files as its schema, so nothing is kept
-in sync by hand.
+Tool versions are pinned in the Makefile and CI; they stay out of `go.mod` so the
+Docker build does not download sqlc's dependency tree. The integration suite
+starts a throwaway `postgres:16-alpine` and applies the real migrations. CI also
+validates the alert rules with `promtool`.
 
 ## Extending
 
-- **New resource** (mirror the `user` vertical):
-  1. `make migrate-new name=create_things` → write the up/down SQL
-  2. Add queries in `db/queries/` → `make sqlc`
-  3. Copy the layout of `internal/service/user/` and `internal/handler/user/`
-     (handlers import their service aliased: `thingsvc ".../service/thing"`).
-     Service packages are two files — `model.go` (types) and `service.go`
-     (`ThingService` + `thingService` + `NewThingService`); see the service
-     conventions in `AGENTS.md`.
-  4. Wire it: construct the service in `internal/app/di.go`, add a field to
-     `server.Deps`, mount the routes in `internal/server/server.go` —
-     `cmd/` and `app.go` stay untouched.
-- **New binary** (worker, cron): add `cmd/<name>/main.go`, reuse `internal/`.
+1. `make migrate-new name=create_things` and write the up/down SQL.
+2. Add queries in `db/queries/`, then run `make sqlc`.
+3. Copy `internal/service/user/` and `internal/handler/user/`; follow the
+   `Input`/`Output` conventions in `AGENTS.md`.
+4. Wire the service in `internal/app/di.go`, add it to `server.Deps`, and mount
+   routes in `internal/server/server.go`.
+
+`cmd/` and `app.go` should not need to change for a new resource.
 
 ## Philosophy
 
-A boilerplate should make the decisions everyone agrees on and leave the
-contested ones to you. Deliberately **not** included:
+This template makes the decisions everyone agrees on and leaves the contested
+ones to you. Deliberately not included: authentication, Swagger/OpenAPI, mock
+generators, CORS/trusted-proxy handling, gRPC, queues, and workers.
 
-- **Auth** — JWT vs sessions vs an external provider is a per-project decision
-- **Swagger/OpenAPI** — annotation noise; pick your own spec workflow
-- **Mock generators** — interfaces + hand-written fakes are enough (see the tests)
-- **CORS / trusted-proxy handling** — depends on your deployment topology;
-  add middleware in `internal/server/` to fit it
-- **gRPC / message queues / workers** — add them when you need them. The
-  lifecycle already runs on an `errgroup`, so a second long-running component is
-  one `g.Go` away.
-
-One complete example vertical (`user`) is the documentation: copy it, rename
-it, ship. AI coding agents get their own guidance in [AGENTS.md](AGENTS.md).
+The `user` vertical is the complete example: copy it, rename it, ship it. AI
+coding agents should read [AGENTS.md](AGENTS.md); this README is for humans.
