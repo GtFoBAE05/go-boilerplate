@@ -71,6 +71,7 @@ type errorEnvelope struct {
 // straight to the ResponseWriter commits a 200 first, so a marshal failure
 // halfway through would ship a truncated body under a success status.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if v == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -81,6 +82,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(&buf).Encode(v); err != nil {
 		// Nothing has been written yet, so a clean 500 is still possible.
 		// Hand-rolled body: re-entering WriteJSON could fail the same way.
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":{"code":"INTERNAL","message":"internal server error"}}`))
@@ -113,11 +115,13 @@ func NoContent(w http.ResponseWriter) {
 
 // WriteError writes an error envelope: {"error": {"code", "message"}}.
 func WriteError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Cache-Control", "no-store")
 	WriteJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message}})
 }
 
 // writeValidationError adds per-field messages; used by DecodeValid.
 func writeValidationError(w http.ResponseWriter, fields map[string]string) {
+	w.Header().Set("Cache-Control", "no-store")
 	WriteJSON(w, http.StatusUnprocessableEntity, errorEnvelope{Error: errorBody{
 		Code:    CodeValidationFailed,
 		Message: "validation failed",
@@ -125,8 +129,31 @@ func writeValidationError(w http.ResponseWriter, fields map[string]string) {
 	}})
 }
 
+// statusForKind is the only place HTTP statuses enter the domain-error path.
+// A new Kind belongs here and in platform/errors; a new resource does not.
+func statusForKind(kind service.Kind) int {
+	switch kind {
+	case service.KindInvalid:
+		return http.StatusUnprocessableEntity
+	case service.KindUnauthenticated:
+		return http.StatusUnauthorized
+	case service.KindForbidden:
+		return http.StatusForbidden
+	case service.KindNotFound:
+		return http.StatusNotFound
+	case service.KindConflict:
+		return http.StatusConflict
+	case service.KindInternal:
+		return http.StatusInternalServerError
+	default:
+		// An unclassified domain error is a programming error; do not leak
+		// the fact that it was unclassified to the client.
+		return http.StatusInternalServerError
+	}
+}
+
 // WriteServiceError turns a service-layer error into a response. A
-// *service.Error supplies its own status and code, so this function needs no
+// *service.Error supplies its own code and Kind, so this function needs no
 // per-resource cases; context errors map to timeouts; anything else is logged
 // and returned as a 500 without leaking internals. It also marks the active
 // span so traces reflect HTTP-level failures.
@@ -139,8 +166,8 @@ func WriteServiceError(w http.ResponseWriter, r *http.Request, log *slog.Logger,
 	if ctxErr := r.Context().Err(); ctxErr != nil {
 		switch {
 		case errors.Is(ctxErr, context.DeadlineExceeded):
-			// server.request_timeout fired. chi's Timeout middleware only
-			// cancels the context; this is what actually writes the 504.
+			// The requestTimeout middleware cancels the context; this is
+			// what writes the 504 envelope when the handler notices.
 			span.SetStatus(codes.Error, "request timeout")
 			log.WarnContext(r.Context(), "request timed out", "error", err)
 			WriteError(w, http.StatusGatewayTimeout, CodeTimeout, "request timed out")
@@ -158,11 +185,19 @@ func WriteServiceError(w http.ResponseWriter, r *http.Request, log *slog.Logger,
 	var domainErr *service.Error
 	if errors.As(err, &domainErr) {
 		span.SetStatus(codes.Error, domainErr.Code)
-		WriteJSON(w, domainErr.Status, errorEnvelope{Error: errorBody{
+		body := errorBody{
 			Code:    domainErr.Code,
 			Message: domainErr.Message,
 			Details: domainErr.Details,
-		}})
+		}
+		// A validation error carries map[string]string in Details; render it
+		// as the contract's "fields" object instead of opaque details.
+		if fields, ok := domainErr.Details.(map[string]string); ok && domainErr.Kind == service.KindInvalid {
+			body.Fields = fields
+			body.Details = nil
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		WriteJSON(w, statusForKind(domainErr.Kind), errorEnvelope{Error: body})
 		return
 	}
 

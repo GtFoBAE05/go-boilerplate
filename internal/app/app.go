@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/config"
-	"github.com/GtFoBAE05/go-boilerplate/internal/platform/cache"
-	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/redis"
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/telemetry"
@@ -96,14 +94,17 @@ func Run(cfg *config.Config) error {
 		}
 	}
 
-	rdb, svcCache, closeRedis, err := setupRedis(ctx, cfg, log)
+	rdb, redisUnavailable, closeRedis, err := setupRedis(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
 	defer closeRedis()
 
-	redisRequired := cfg.Redis.Mode == platformconfig.RedisModeRequired
-	srv := server.New(cfg, log, buildDeps(pool, rdb, redisRequired, svcCache, log))
+	redisRequired := cfg.Redis.Mode == config.RedisModeRequired
+	srv, err := server.New(cfg, log, buildDeps(pool, rdb, redisUnavailable, redisRequired, log))
+	if err != nil {
+		return fmt.Errorf("build server: %w", err)
+	}
 	pprofSrv := server.NewPprofServer(cfg.Pprof.Enabled, cfg.Pprof.Port, log)
 
 	// Each listener runs in the group; the first hard failure cancels runCtx
@@ -185,31 +186,35 @@ func shutdownCause(signalled bool) string {
 }
 
 // setupRedis honors redis.mode: absent in disabled mode, fatal in required
-// mode, best-effort in optional mode. The returned cache stays a nil interface
-// (not a typed-nil *cache.Cache) when Redis is unavailable, so the services'
-// nil checks keep working.
+// mode, best-effort in optional mode. The rate limiter is the consumer today;
+// server.Deps carries the client for any future Redis-backed feature.
 func setupRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) (
-	*goredis.Client, cache.Cache, func(), error,
+	*goredis.Client, error, func(), error,
 ) {
 	noop := func() {}
 
-	if cfg.Redis.Mode == platformconfig.RedisModeDisabled {
-		log.Info("redis disabled, running without cache")
+	if cfg.Redis.Mode == config.RedisModeDisabled {
+		log.Info("redis disabled, running without redis-backed features")
 		return nil, nil, noop, nil
 	}
 
 	client, err := redis.New(ctx, cfg.Redis.Addr,
 		redis.Password(cfg.Redis.Password),
 		redis.DB(cfg.Redis.DB),
+		redis.TLS(cfg.Redis.TLSEnabled, cfg.Redis.TLSInsecureSkipVerify),
+		redis.DialTimeout(cfg.Redis.DialTimeout),
+		redis.ReadTimeout(cfg.Redis.ReadTimeout),
+		redis.WriteTimeout(cfg.Redis.WriteTimeout),
+		redis.PoolSize(cfg.Redis.PoolSize),
 	)
 	if err != nil {
-		if cfg.Redis.Mode == platformconfig.RedisModeRequired {
+		if cfg.Redis.Mode == config.RedisModeRequired {
 			return nil, nil, noop, fmt.Errorf("connect redis (required): %w", err)
 		}
-		log.Warn("redis unreachable, running without cache", "error", err)
-		return nil, nil, noop, nil
+		log.Warn("redis unreachable, running without redis-backed features", "error", err)
+		return nil, err, noop, nil
 	}
 
 	log.Info("connected to redis", "redis", cfg.Redis)
-	return client, cache.New(client, cfg.Cache.DefaultTTL), func() { _ = client.Close() }, nil
+	return client, nil, func() { _ = client.Close() }, nil
 }

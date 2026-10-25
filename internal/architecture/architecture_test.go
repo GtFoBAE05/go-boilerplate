@@ -13,7 +13,19 @@ import (
 type listedPackage struct {
 	ImportPath string
 	Imports    []string
-	Module     *struct{ Path string }
+	// TestImports are the dependencies of _test.go files. They are checked
+	// too: a handler test that imports repository can bypass the service layer
+	// just as effectively as production code, and the architecture claim would
+	// be false the moment it landed.
+	TestImports  []string
+	XTestImports []string
+	Module       *struct{ Path string }
+}
+
+func (p listedPackage) allImports() []string {
+	imports := append([]string{}, p.Imports...)
+	imports = append(imports, p.TestImports...)
+	return append(imports, p.XTestImports...)
 }
 
 func TestArchitecture(t *testing.T) {
@@ -32,7 +44,7 @@ func TestArchitecture(t *testing.T) {
 			if !strings.HasPrefix(pkg.ImportPath, service+"/") {
 				continue
 			}
-			for _, imported := range pkg.Imports {
+			for _, imported := range pkg.allImports() {
 				if strings.HasPrefix(imported, service+"/") && imported != pkg.ImportPath {
 					t.Errorf("%s imports %s: service packages must not depend on other service packages", pkg.ImportPath, imported)
 				}
@@ -45,7 +57,7 @@ func TestArchitecture(t *testing.T) {
 			if pkg.ImportPath != handler && !strings.HasPrefix(pkg.ImportPath, handler+"/") {
 				continue
 			}
-			for _, imported := range pkg.Imports {
+			for _, imported := range pkg.allImports() {
 				if imported == repository || strings.HasPrefix(imported, repository+"/") {
 					t.Errorf("%s imports %s: handlers call services and must not bypass them for repository access", pkg.ImportPath, imported)
 				}
@@ -58,7 +70,7 @@ func TestArchitecture(t *testing.T) {
 			if !strings.HasPrefix(pkg.ImportPath, platform+"/") {
 				continue
 			}
-			for _, imported := range pkg.Imports {
+			for _, imported := range pkg.allImports() {
 				if strings.HasPrefix(imported, internal) && !strings.HasPrefix(imported, platform+"/") {
 					t.Errorf("%s imports %s: platform packages must not depend on application packages", pkg.ImportPath, imported)
 				}
@@ -71,7 +83,7 @@ func TestArchitecture(t *testing.T) {
 			if pkg.ImportPath != repository && !strings.HasPrefix(pkg.ImportPath, repository+"/") {
 				continue
 			}
-			for _, imported := range pkg.Imports {
+			for _, imported := range pkg.allImports() {
 				if imported == handler || strings.HasPrefix(imported, handler+"/") || imported == service || strings.HasPrefix(imported, service+"/") {
 					t.Errorf("%s imports %s: repository packages must not depend on handlers or services", pkg.ImportPath, imported)
 				}
@@ -81,7 +93,7 @@ func TestArchitecture(t *testing.T) {
 
 	t.Run("only composition imports config", func(t *testing.T) {
 		for _, pkg := range pkgs {
-			for _, imported := range pkg.Imports {
+			for _, imported := range pkg.allImports() {
 				if imported != config || allowedConfigImporter(pkg.ImportPath, module) {
 					continue
 				}

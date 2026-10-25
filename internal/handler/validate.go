@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,17 +51,30 @@ type normalizer interface{ Normalize() }
 func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	var req T
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-	dec := json.NewDecoder(r.Body)
-	// Reject fields the DTO doesn't declare, so typos ("emial") fail loudly
-	// instead of being silently dropped.
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			WriteError(w, http.StatusRequestEntityTooLarge, CodePayloadTooLarge,
 				fmt.Sprintf("request body must not exceed %d bytes", maxErr.Limit))
 			return req, false
 		}
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
+		return req, false
+	}
+	// Go's decoder keeps the last value for a duplicate key. That makes
+	// {"email":"victim@example.com","email":"attacker@example.com"} look
+	// successful while a proxy or audit log may have seen the first value.
+	// Reject duplicates before decoding into the DTO.
+	if err := rejectDuplicateKeys(body); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
+		return req, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	// Reject fields the DTO doesn't declare, so typos ("emial") fail loudly
+	// instead of being silently dropped.
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		// Decoder errors describe the client's own payload; safe to echo.
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "invalid request body: "+err.Error())
 		return req, false
@@ -94,6 +108,73 @@ func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 		return req, false
 	}
 	return req, true
+}
+
+// rejectDuplicateKeys walks the JSON token stream and fails on a repeated key
+// in any object. It intentionally runs before DTO decoding, so the check is
+// independent of the struct shape and covers nested objects too.
+func rejectDuplicateKeys(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := scanJSONValue(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected data after the JSON value")
+	}
+	return nil
+}
+
+func scanJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return errors.New("unterminated object")
+		}
+	case '[':
+		for dec.More() {
+			if err := scanJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return errors.New("unterminated array")
+		}
+	}
+	return nil
 }
 
 // fieldMessage turns a validator tag into a human-readable message.

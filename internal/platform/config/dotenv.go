@@ -15,7 +15,7 @@ import (
 // returning a map lets the caller layer the values underneath the real
 // environment instead (see internal/config.Load).
 func ParseDotEnv(path string) (map[string]string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- operator-supplied config path, not request input
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

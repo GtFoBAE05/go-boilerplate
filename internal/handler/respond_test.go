@@ -28,7 +28,7 @@ func decodeError(t *testing.T, body []byte) errorBody {
 	return env.Error
 }
 
-// A *service.Error supplies its own status and code, which is what keeps this
+// A *service.Error supplies its own Kind and code, which is what keeps this
 // shared layer free of per-resource cases.
 func TestWriteServiceErrorUsesDomainErrorMapping(t *testing.T) {
 	tests := []struct {
@@ -43,8 +43,8 @@ func TestWriteServiceErrorUsesDomainErrorMapping(t *testing.T) {
 		{"wrapped", fmt.Errorf("get user 7: %w", service.ErrNotFound), service.ErrNotFound},
 		{
 			"resource-defined error needs no change here",
-			service.NewError("ORDER_LOCKED", http.StatusConflict, "order is locked"),
-			service.NewError("ORDER_LOCKED", http.StatusConflict, "order is locked"),
+			service.NewError("ORDER_LOCKED", service.KindConflict, "order is locked"),
+			service.NewError("ORDER_LOCKED", service.KindConflict, "order is locked"),
 		},
 	}
 
@@ -55,8 +55,8 @@ func TestWriteServiceErrorUsesDomainErrorMapping(t *testing.T) {
 
 			WriteServiceError(rec, r, discardLogger(), tt.err)
 
-			if rec.Code != tt.want.Status {
-				t.Fatalf("want status %d, got %d", tt.want.Status, rec.Code)
+			if rec.Code != statusForKind(tt.want.Kind) {
+				t.Fatalf("want status %d, got %d", statusForKind(tt.want.Kind), rec.Code)
 			}
 			got := decodeError(t, rec.Body.Bytes())
 			if got.Code != tt.want.Code {
@@ -72,7 +72,7 @@ func TestWriteServiceErrorUsesDomainErrorMapping(t *testing.T) {
 // Structured details survive the mapping; a client that must act on them (say,
 // which rules blocked a removal) should not have to parse the message text.
 func TestWriteServiceErrorCarriesDetails(t *testing.T) {
-	domainErr := service.NewError("RULES_BLOCK", http.StatusConflict, "blocked").
+	domainErr := service.NewError("RULES_BLOCK", service.KindConflict, "blocked").
 		WithDetails(map[string]any{"rules": []string{"self-approval"}})
 
 	rec := httptest.NewRecorder()
@@ -113,8 +113,8 @@ func TestWriteServiceErrorHidesUnmappedError(t *testing.T) {
 	}
 }
 
-// chi's Timeout middleware only cancels the context; this is what turns the
-// resulting deadline error into a 504 rather than a misleading 500.
+// requestTimeout only cancels the context; this is what turns the resulting
+// deadline error into a 504 rather than a misleading 500.
 func TestWriteServiceErrorMapsDeadlineTo504(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
@@ -193,6 +193,18 @@ func TestNoContentWritesNoBody(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("want empty body, got %q", rec.Body.String())
+	}
+}
+
+func TestErrorResponsesDisableCaching(t *testing.T) {
+	rec := httptest.NewRecorder()
+	WriteError(rec, http.StatusBadRequest, CodeBadRequest, "bad")
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("want Cache-Control no-store, got %q", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("want X-Content-Type-Options nosniff, got %q", got)
 	}
 }
 

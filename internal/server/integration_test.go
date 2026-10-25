@@ -14,7 +14,6 @@ import (
 	"time"
 
 	rootconfig "github.com/GtFoBAE05/go-boilerplate/internal/config"
-	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
 	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
 	usersvc "github.com/GtFoBAE05/go-boilerplate/internal/service/user"
@@ -58,18 +57,22 @@ func setupServer(t *testing.T) http.Handler {
 	}
 
 	repo := repository.NewStore(pool)
-	svc := usersvc.NewUserService(repo, nil, log)
+	svc := usersvc.NewUserService(repo, log)
 	cfg := &rootconfig.Config{
-		Service: platformconfig.ServiceConfig{Name: "test", Env: platformconfig.EnvDevelopment},
-		Server: platformconfig.ServerConfig{
+		Service: rootconfig.ServiceConfig{Name: "test", Env: rootconfig.EnvDevelopment},
+		Server: rootconfig.ServerConfig{
 			Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second,
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			RequestTimeout: 20 * time.Second,
 		},
-		Redis:     platformconfig.RedisConfig{Mode: platformconfig.RedisModeDisabled},
-		RateLimit: platformconfig.RateLimitConfig{Enabled: false},
+		Redis:     rootconfig.RedisConfig{Mode: rootconfig.RedisModeDisabled},
+		RateLimit: rootconfig.RateLimitConfig{Enabled: false},
 	}
-	return New(cfg, log, Deps{Users: svc, Pool: pool}).http.Handler
+	srv, err := New(cfg, log, Deps{Users: svc, Postgres: pool})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
+	return srv.http.Handler
 }
 
 type apiResponse struct {
@@ -157,6 +160,12 @@ func TestUserHTTPVertical(t *testing.T) {
 		`{"name":"Other","email":"ada@example.com"}`, http.StatusConflict))
 	if duplicate.Error.Code != "EMAIL_TAKEN" {
 		t.Fatalf("duplicate email: want EMAIL_TAKEN, got %q", duplicate.Error.Code)
+	}
+
+	caseVariant := decodeResponse(t, do(t, h, http.MethodPost, "/api/v1/users",
+		`{"name":"Other","email":"ADA@Example.COM"}`, http.StatusConflict))
+	if caseVariant.Error.Code != "EMAIL_TAKEN" {
+		t.Fatalf("case-variant duplicate: want EMAIL_TAKEN, got %q", caseVariant.Error.Code)
 	}
 
 	invalid := decodeResponse(t, do(t, h, http.MethodPost, "/api/v1/users",

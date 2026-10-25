@@ -147,15 +147,15 @@ func TestValidateRejectsBadValues(t *testing.T) {
 			func(c *Config) { c.Server.ReadHeaderTimeout = 0 },
 			"read_header_timeout",
 		},
-		{"pprof port collides", func(c *Config) { c.Pprof = platformconfig.PprofConfig{Enabled: true, Port: c.Server.Port} }, "pprof.port"},
-		{"pprof port out of range", func(c *Config) { c.Pprof = platformconfig.PprofConfig{Enabled: true, Port: 70000} }, "pprof.port"},
-		{"pprof port unset while enabled", func(c *Config) { c.Pprof = platformconfig.PprofConfig{Enabled: true} }, "pprof.port"},
+		{"pprof port collides", func(c *Config) { c.Pprof = PprofConfig{Enabled: true, Port: c.Server.Port} }, "pprof.port"},
+		{"pprof port out of range", func(c *Config) { c.Pprof = PprofConfig{Enabled: true, Port: 70000} }, "pprof.port"},
+		{"pprof port unset while enabled", func(c *Config) { c.Pprof = PprofConfig{Enabled: true} }, "pprof.port"},
 		{"empty dsn", func(c *Config) { c.Postgres.DSN = "  " }, "postgres.dsn"},
 		{"min above max conns", func(c *Config) { c.Postgres.MinConns = 99 }, "min_conns"},
 		{"bad exec mode", func(c *Config) { c.Postgres.QueryExecMode = "prepared" }, "query_exec_mode"},
 		{"bad redis mode", func(c *Config) { c.Redis.Mode = "maybe" }, "redis.mode"},
-		{"production optional redis with limiter", func(c *Config) { c.Redis.Mode = platformconfig.RedisModeOptional }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
-		{"production disabled redis with limiter", func(c *Config) { c.Redis.Mode = platformconfig.RedisModeDisabled }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
+		{"production optional redis with limiter", func(c *Config) { c.Redis.Mode = RedisModeOptional }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
+		{"production disabled redis with limiter", func(c *Config) { c.Redis.Mode = RedisModeDisabled }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
 		{"bad log level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 		{"bad log format", func(c *Config) { c.Log.Format = "xml" }, "log.format"},
 		{"sampler arg above 1", func(c *Config) { c.OTel.TracesSamplerArg = 1.5 }, "otel.traces_sampler_arg"},
@@ -193,11 +193,11 @@ func TestLoadProductionRateLimitRedisGuard(t *testing.T) {
 		allowLocal string
 		wantErr    string
 	}{
-		{"production optional", platformconfig.EnvProduction, string(platformconfig.RedisModeOptional), "true", "false", "RATELIMIT_ALLOW_PROCESS_LOCAL"},
-		{"production optional with explicit local budget", platformconfig.EnvProduction, string(platformconfig.RedisModeOptional), "true", "true", ""},
-		{"production required", platformconfig.EnvProduction, string(platformconfig.RedisModeRequired), "true", "false", ""},
-		{"development optional", platformconfig.EnvDevelopment, string(platformconfig.RedisModeOptional), "true", "false", ""},
-		{"production optional with limiter disabled", platformconfig.EnvProduction, string(platformconfig.RedisModeOptional), "false", "false", ""},
+		{"production optional", EnvProduction, string(RedisModeOptional), "true", "false", "RATELIMIT_ALLOW_PROCESS_LOCAL"},
+		{"production optional with explicit local budget", EnvProduction, string(RedisModeOptional), "true", "true", ""},
+		{"production required", EnvProduction, string(RedisModeRequired), "true", "false", ""},
+		{"development optional", EnvDevelopment, string(RedisModeOptional), "true", "false", ""},
+		{"production optional with limiter disabled", EnvProduction, string(RedisModeOptional), "false", "false", ""},
 	}
 
 	for _, tt := range tests {
@@ -247,7 +247,7 @@ func TestValidateReportsAllErrors(t *testing.T) {
 // would be a landmine for anyone who changes server.port to 6060.
 func TestDisabledPprofSettingsAreInert(t *testing.T) {
 	cfg := validConfig()
-	cfg.Pprof = platformconfig.PprofConfig{Enabled: false, Port: cfg.Server.Port}
+	cfg.Pprof = PprofConfig{Enabled: false, Port: cfg.Server.Port}
 
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("disabled pprof must not be validated: %v", err)
@@ -289,19 +289,45 @@ func TestDisabledOTelSettingsAreInert(t *testing.T) {
 }
 
 // The production-safe default matters because a deployment ships no file:
-// replicas racing to migrate on rollout must be opt-in.
-func TestMigrateDefaultsOff(t *testing.T) {
+// replicas racing to migrate on rollout must be opt-in, and a limiter must not
+// silently become per-process.
+func TestProductionDefaultsAreSafe(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load defaults: %v", err)
 	}
+	if cfg.Service.Env != EnvProduction {
+		t.Fatalf("service.env must default to production, got %q", cfg.Service.Env)
+	}
+	if cfg.Redis.Mode != RedisModeRequired {
+		t.Fatalf("redis.mode must default to required, got %q", cfg.Redis.Mode)
+	}
 	if cfg.Postgres.Migrate {
 		t.Fatal("postgres.migrate must default to false")
 	}
 	if cfg.Pprof.Enabled {
 		t.Fatal("pprof.enabled must default to false")
+	}
+}
+
+func TestProductionRejectsBootMigrations(t *testing.T) {
+	cfg := validConfig()
+	cfg.Postgres.Migrate = true
+
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "postgres.migrate") {
+		t.Fatalf("want postgres.migrate error, got %v", err)
+	}
+}
+
+func TestProductionRejectsInsecureRedisTLS(t *testing.T) {
+	cfg := validConfig()
+	cfg.Redis.TLSEnabled = true
+	cfg.Redis.TLSInsecureSkipVerify = true
+
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "tls_insecure_skip_verify") {
+		t.Fatalf("want tls_insecure_skip_verify error, got %v", err)
 	}
 }
 
@@ -334,7 +360,7 @@ func TestRedactDSN(t *testing.T) {
 // LogValue is the guard that stops a whole-config log line from leaking
 // credentials, so assert the secret is absent from the rendered value.
 func TestPostgresLogValueRedactsPassword(t *testing.T) {
-	p := platformconfig.PostgresConfig{DSN: "postgres://app:s3cret@localhost:5433/app", QueryExecMode: "exec"}
+	p := PostgresConfig{DSN: "postgres://app:s3cret@localhost:5433/app", QueryExecMode: "exec"}
 
 	if rendered := p.LogValue().String(); strings.Contains(rendered, "s3cret") {
 		t.Fatalf("password leaked in log value: %s", rendered)
@@ -342,7 +368,7 @@ func TestPostgresLogValueRedactsPassword(t *testing.T) {
 }
 
 func TestRedisLogValueRedactsPassword(t *testing.T) {
-	r := platformconfig.RedisConfig{Mode: platformconfig.RedisModeOptional, Addr: "localhost:6380", Password: "s3cret"}
+	r := RedisConfig{Mode: RedisModeOptional, Addr: "localhost:6380", Password: "s3cret"}
 
 	if rendered := r.LogValue().String(); strings.Contains(rendered, "s3cret") {
 		t.Fatalf("password leaked in log value: %s", rendered)
@@ -353,21 +379,24 @@ func TestRedisLogValueRedactsPassword(t *testing.T) {
 // failure names the rule under test.
 func validConfig() *Config {
 	return &Config{
-		Service: platformconfig.ServiceConfig{Name: "test", Env: platformconfig.EnvProduction},
-		Server:  platformconfig.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, ShutdownTimeout: 20 * time.Second, RequestTimeout: 20 * time.Second, DrainDelay: 5 * time.Second},
-		Postgres: platformconfig.PostgresConfig{
+		Service: ServiceConfig{Name: "test", Env: EnvProduction},
+		Server:  ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, ShutdownTimeout: 20 * time.Second, RequestTimeout: 20 * time.Second, DrainDelay: 5 * time.Second},
+		Postgres: PostgresConfig{
 			DSN: "postgres://app:app@localhost:5433/app", MaxConns: 25, MinConns: 2,
 			MaxConnLifetime: time.Hour, QueryExecMode: "cache_statement",
 		},
 		// This fixture is production-shaped, so its limiter uses shared Redis.
-		Redis: platformconfig.RedisConfig{Mode: platformconfig.RedisModeRequired, Addr: "localhost:6380"},
-		Cache: platformconfig.CacheConfig{DefaultTTL: 5 * time.Minute},
-		OTel: platformconfig.OTelConfig{
-			TracesExporter: platformconfig.OTelExporterOTLP, MetricsExporter: platformconfig.OTelExporterOTLP,
+		Redis: RedisConfig{
+			Mode: RedisModeRequired, Addr: "localhost:6380",
+			DialTimeout: 5 * time.Second, ReadTimeout: 3 * time.Second,
+			WriteTimeout: 3 * time.Second, PoolSize: 10,
+		},
+		OTel: OTelConfig{
+			TracesExporter: OTelExporterOTLP, MetricsExporter: OTelExporterOTLP,
 			Endpoint: "http://localhost:4317", TracesSampler: "parentbased_traceidratio",
 			TracesSamplerArg: 1.0, MetricExportIntervalMillis: 60000,
 		},
-		Log:       platformconfig.LogConfig{Level: "info", Format: "json"},
-		RateLimit: platformconfig.RateLimitConfig{Enabled: true, Requests: 40, Window: time.Second},
+		Log:       LogConfig{Level: "info", Format: "json"},
+		RateLimit: RateLimitConfig{Enabled: true, Requests: 40, Window: time.Second},
 	}
 }

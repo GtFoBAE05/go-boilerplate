@@ -18,6 +18,7 @@ env:
   SQLC_VERSION: "1.30.0"
   VULN_VERSION: "v1.1.4"
   GOLANGCI_VERSION: "v2.15.0"
+  GOSEC_VERSION: "v2.30.0"
 
 jobs:
   lint:
@@ -39,6 +40,19 @@ jobs:
           # already does locally, so this is the only mode where the pin means
           # the same thing in both places.
           install-mode: goinstall
+
+  # gosec is not a golangci-lint linter: it needs type information from the
+  # whole module and is updated independently. Keep its pin in sync with the
+  # Makefile's GOSEC_VERSION.
+  gosec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go run github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }} -quiet ./...
 
   # Proves the documented invariant that `go test ./...` needs no Docker: this
   # job has no services and must stay that way.
@@ -101,6 +115,22 @@ jobs:
           sqlc-version: ${{ env.SQLC_VERSION }}
       - run: sqlc diff || (echo "sqlc-generated code is stale; run 'make sqlc'" && exit 1)
 
+  # Alert rules that query a series which does not exist never fire and never
+  # tell you. promtool is the only check that catches a typo in an expression
+  # before an incident does.
+  promtool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Prometheus rules
+        run: |
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/deploy:/deploy:ro" \
+            prom/prometheus:v3.14.0 \
+            check rules /deploy/rules.yml
+
   # .env.example and internal/config drift apart silently otherwise: nothing
   # else in CI loads it, and a developer copying it to .env finds out first.
   config:
@@ -137,6 +167,7 @@ jobs:
             -e POSTGRES_DSN="postgres://app:app@127.0.0.1:59999/app?sslmode=disable" \
             -e OTEL_SDK_DISABLED=true \
             -e REDIS_MODE=disabled \
+            -e RATELIMIT_ENABLED=false \
             go-boilerplate:ci 2>&1 || true)
           echo "$output"
           # Reaching the Postgres dial means config loaded and the app booted.

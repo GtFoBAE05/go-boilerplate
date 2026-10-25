@@ -2,11 +2,11 @@
 // environment variables (e.g. SERVER_PORT=9090), with a local .env file as a
 // development convenience and production-safe defaults underneath.
 //
-// The section types and their validators are shared infrastructure and live in
-// internal/platform/config. What stays here is what makes this application
-// itself: which sections it composes, the defaults it ships, and the load
-// order. Adding a knob means registering it in setDefaults - Viper's
-// AutomaticEnv only resolves keys it already knows.
+// The section types and their validators live here, next to the defaults that
+// compose them. internal/platform/config is deliberately limited to the
+// generic dotenv and redaction helpers: a package under platform/ must stay
+// usable by any service, and this application's Redis/OTel/rate-limit sections
+// are not.
 //
 // .env.example is the single list of available settings, written exactly as
 // a deployment sets them - there is deliberately one vocabulary, not a
@@ -25,15 +25,14 @@ import (
 
 // Config is the root of all application settings, one field per subsystem.
 type Config struct {
-	Service   platformconfig.ServiceConfig   `mapstructure:"service"`
-	Server    platformconfig.ServerConfig    `mapstructure:"server"`
-	Pprof     platformconfig.PprofConfig     `mapstructure:"pprof"`
-	Postgres  platformconfig.PostgresConfig  `mapstructure:"postgres"`
-	Redis     platformconfig.RedisConfig     `mapstructure:"redis"`
-	Cache     platformconfig.CacheConfig     `mapstructure:"cache"`
-	OTel      platformconfig.OTelConfig      `mapstructure:"otel"`
-	Log       platformconfig.LogConfig       `mapstructure:"log"`
-	RateLimit platformconfig.RateLimitConfig `mapstructure:"ratelimit"`
+	Service   ServiceConfig   `mapstructure:"service"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Pprof     PprofConfig     `mapstructure:"pprof"`
+	Postgres  PostgresConfig  `mapstructure:"postgres"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	OTel      OTelConfig      `mapstructure:"otel"`
+	Log       LogConfig       `mapstructure:"log"`
+	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 }
 
 // DotEnvFile is the optional local overrides file, loaded from the working
@@ -83,19 +82,18 @@ func Load() (*Config, error) {
 // A boilerplate is copied far more often than it is read, so an unset or
 // fat-fingered override must fail at boot rather than degrade in production.
 //
-// Each section's rules live with its type in platform/config. Only the checks
-// that need two sections at once belong here.
+// Each section's rules live with its type in validate.go. Only the checks that
+// need two sections at once belong here.
 func (c *Config) validate() error {
 	errs := []error{
-		platformconfig.ValidateService(&c.Service),
-		platformconfig.ValidateServer(&c.Server),
-		platformconfig.ValidatePprof(&c.Pprof),
-		platformconfig.ValidatePostgres(&c.Postgres),
-		platformconfig.ValidateRedis(&c.Redis),
-		platformconfig.ValidateCache(&c.Cache),
-		platformconfig.ValidateOTel(&c.OTel),
-		platformconfig.ValidateLog(&c.Log),
-		platformconfig.ValidateRateLimit(&c.RateLimit),
+		ValidateService(&c.Service),
+		ValidateServer(&c.Server),
+		ValidatePprof(&c.Pprof),
+		ValidatePostgres(&c.Postgres),
+		ValidateRedis(&c.Redis),
+		ValidateOTel(&c.OTel),
+		ValidateLog(&c.Log),
+		ValidateRateLimit(&c.RateLimit),
 	}
 
 	// Two listeners on the same port would make one of them fail at bind time
@@ -104,16 +102,30 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Errorf("pprof.port (%d) must differ from server.port", c.Pprof.Port))
 	}
 	// Only the limiter is correctness-critical: a shared counter is what makes
-	// the cap global. Cache may degrade to Postgres reads; limits may not
-	// quietly multiply by the replica count.
-	if c.Service.Env == platformconfig.EnvProduction &&
+	// the cap global. A local limiter may not quietly multiply by the replica
+	// count.
+	if c.Service.Env == EnvProduction &&
 		c.RateLimit.Enabled &&
 		!c.RateLimit.AllowProcessLocal &&
-		c.Redis.Mode != platformconfig.RedisModeRequired {
+		c.Redis.Mode != RedisModeRequired {
 		errs = append(errs, fmt.Errorf(
 			"production with rate limiting requires redis.mode=required (got %q): "+
 				"set REDIS_MODE=required, or RATELIMIT_ALLOW_PROCESS_LOCAL=true to accept one budget per replica",
 			c.Redis.Mode))
+	}
+	// Migrations from every replica at once are a race, not a rollout. CI or a
+	// dedicated job owns them in production; the boot-time switch is a local
+	// development convenience only.
+	if c.Service.Env == EnvProduction && c.Postgres.Migrate {
+		errs = append(errs, errors.New(
+			"postgres.migrate must be false in production: run migrations from CI or a dedicated job, "+
+				"not from every replica at boot"))
+	}
+	// TLS without verification is worse than no TLS: it encrypts traffic to a
+	// server whose identity nobody checked.
+	if c.Service.Env == EnvProduction && c.Redis.TLSEnabled && c.Redis.TLSInsecureSkipVerify {
+		errs = append(errs, errors.New(
+			"redis.tls_insecure_skip_verify must be false in production"))
 	}
 
 	return errors.Join(errs...)
@@ -122,9 +134,14 @@ func (c *Config) validate() error {
 // setDefaults registers every key with its production-safe value; Viper's
 // AutomaticEnv only resolves keys it already knows, so an unregistered key
 // would be invisible even when its variable is set.
+//
+// Production-safe means the value a deployment gets when it ships no file:
+// SERVICE_ENV=production, Redis required (the distributed rate limiter must
+// not silently become per-process), and migrations off. .env.example opts into
+// the convenient development values.
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("service.name", "go-boilerplate")
-	v.SetDefault("service.env", platformconfig.EnvDevelopment)
+	v.SetDefault("service.env", EnvProduction)
 
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.read_timeout", "10s")
@@ -145,16 +162,20 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("postgres.migrate", false)
 	v.SetDefault("postgres.query_exec_mode", "cache_statement")
 
-	v.SetDefault("redis.mode", string(platformconfig.RedisModeOptional))
+	v.SetDefault("redis.mode", string(RedisModeRequired))
 	v.SetDefault("redis.addr", "localhost:6380")
 	v.SetDefault("redis.password", "")
 	v.SetDefault("redis.db", 0)
-
-	v.SetDefault("cache.default_ttl", "5m")
+	v.SetDefault("redis.tls_enabled", false)
+	v.SetDefault("redis.tls_insecure_skip_verify", false)
+	v.SetDefault("redis.dial_timeout", "5s")
+	v.SetDefault("redis.read_timeout", "3s")
+	v.SetDefault("redis.write_timeout", "3s")
+	v.SetDefault("redis.pool_size", 10)
 
 	v.SetDefault("otel.sdk_disabled", false)
-	v.SetDefault("otel.traces_exporter", platformconfig.OTelExporterOTLP)
-	v.SetDefault("otel.metrics_exporter", platformconfig.OTelExporterOTLP)
+	v.SetDefault("otel.traces_exporter", OTelExporterOTLP)
+	v.SetDefault("otel.metrics_exporter", OTelExporterOTLP)
 	v.SetDefault("otel.exporter_otlp_endpoint", "http://localhost:4317")
 	// Empty means "inherit the base endpoint"; registered anyway because
 	// AutomaticEnv only resolves keys Viper already knows.
