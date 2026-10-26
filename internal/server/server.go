@@ -36,8 +36,9 @@ type Server struct {
 	health *health.Handler
 }
 
-// keyByRemoteIP buckets counters by the unspoofable TCP peer; on a parse failure
-// it falls back to the raw value so limiting still applies.
+// keyByRemoteIP buckets counters by RemoteAddr. trustedProxy rewrites it from
+// X-Forwarded-For only when the TCP peer is a configured proxy; on a parse
+// failure it falls back to the raw value so limiting still applies.
 func keyByRemoteIP(r *http.Request) (string, error) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -122,16 +123,20 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 		return nil, fmt.Errorf("server: users service is required")
 	}
 
+	trustedNets, err := parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("server: %w", err)
+	}
+
 	r := chi.NewRouter()
 
 	// Validate the request ID before chi adopts it. An unbounded, arbitrary
 	// header would otherwise land in every log line and trace.
 	r.Use(sanitizeRequestID)
 	r.Use(chimw.RequestID)
-	// No RealIP middleware on purpose: it trusts X-Forwarded-For / X-Real-IP
-	// unconditionally, letting any client spoof its address (and evade the
-	// rate limiter). Deployments behind a trusted proxy should add their own
-	// middleware that only honors forwarded headers from that proxy.
+	r.Use(trustedProxy(trustedNets))
+	// No chi RealIP middleware: it trusts forwarded headers unconditionally.
+	// trustedProxy above is the opt-in, CIDR-gated replacement.
 	r.Use(routePattern)
 	r.Use(requestLogger(log))
 	r.Use(recoverPanics(log))

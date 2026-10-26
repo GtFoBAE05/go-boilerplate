@@ -30,10 +30,34 @@ type Config struct {
 // directory. It is git-ignored; .env.example documents every key.
 const DotEnvFile = ".env"
 
-// Load builds configuration from environment variables, falling back to
-// setDefaults. A .env file is layered underneath, so precedence is
+// Load builds the API configuration from environment variables, falling back
+// to setDefaults. A .env file is layered underneath, so precedence is
 // environment > .env > defaults; deployments ship no file.
 func Load() (*Config, error) {
+	cfg, err := load()
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	return cfg, nil
+}
+
+// LoadMigrate loads only the settings cmd/migrate needs. The API's Redis,
+// telemetry, and rate-limit settings must not block a migration job.
+func LoadMigrate() (*Config, error) {
+	cfg, err := load()
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validateMigrate(); err != nil {
+		return nil, fmt.Errorf("invalid migration config: %w", err)
+	}
+	return cfg, nil
+}
+
+func load() (*Config, error) {
 	dotEnv, err := platformconfig.ParseDotEnv(DotEnvFile)
 	if err != nil {
 		return nil, err
@@ -58,9 +82,6 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
-	}
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &cfg, nil
 }
@@ -110,7 +131,34 @@ func (c *Config) validate() error {
 		errs = append(errs, errors.New(
 			"redis.tls_insecure_skip_verify must be false in production"))
 	}
+	// A production DSN must verify the server certificate; sslmode=disable
+	// silently sends credentials and data in plaintext.
+	if c.Service.Env == EnvProduction && strings.TrimSpace(c.Postgres.DSN) != "" {
+		if err := validatePostgresTLS(c.Postgres.DSN); err != nil {
+			errs = append(errs, fmt.Errorf("postgres.dsn: %w", err))
+		}
+	}
 
+	return errors.Join(errs...)
+}
+
+// validateMigrate keeps the migration job independent of the API's Redis and
+// telemetry settings. Production requires a dedicated DDL role so the runtime
+// role never needs CREATE/ALTER/DROP.
+func (c *Config) validateMigrate() error {
+	errs := []error{
+		ValidateService(&c.Service),
+		ValidatePostgresMigration(&c.Postgres),
+		ValidateLog(&c.Log),
+	}
+	if c.Service.Env == EnvProduction {
+		if strings.TrimSpace(c.Postgres.MigrationDSN) == "" {
+			errs = append(errs, errors.New(
+				"postgres.migration_dsn must be set in production; point it at a DDL role, not the runtime DSN"))
+		} else if err := validatePostgresTLS(c.Postgres.MigrationDSN); err != nil {
+			errs = append(errs, fmt.Errorf("postgres.migration_dsn: %w", err))
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -129,14 +177,22 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.shutdown_timeout", "20s")
 	v.SetDefault("server.request_timeout", "20s")
 	v.SetDefault("server.drain_delay", "5s")
+	v.SetDefault("server.trusted_proxy_cidrs", "")
 	// Off by default; the port is pre-filled so enabling it needs one variable.
 	v.SetDefault("pprof.enabled", false)
 	v.SetDefault("pprof.port", 6060)
 
-	v.SetDefault("postgres.dsn", "postgres://app:app@localhost:5433/app?sslmode=disable")
+	// No default DSN: production must set an explicit, TLS-verified connection
+	// string. .env.example supplies the local development one.
+	v.SetDefault("postgres.dsn", "")
+	v.SetDefault("postgres.migration_dsn", "")
 	v.SetDefault("postgres.max_conns", 25)
 	v.SetDefault("postgres.min_conns", 2)
 	v.SetDefault("postgres.max_conn_lifetime", "1h")
+	v.SetDefault("postgres.max_conn_lifetime_jitter", "5m")
+	v.SetDefault("postgres.statement_timeout", "10s")
+	v.SetDefault("postgres.lock_timeout", "5s")
+	v.SetDefault("postgres.idle_in_transaction_timeout", "30s")
 	v.SetDefault("postgres.migrate", false)
 	v.SetDefault("postgres.query_exec_mode", "cache_statement")
 
@@ -154,7 +210,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("otel.sdk_disabled", false)
 	v.SetDefault("otel.traces_exporter", OTelExporterOTLP)
 	v.SetDefault("otel.metrics_exporter", OTelExporterOTLP)
-	v.SetDefault("otel.exporter_otlp_endpoint", "http://localhost:4317")
+	// No default endpoint: an enabled exporter must point somewhere explicit,
+	// not silently at localhost in production.
+	v.SetDefault("otel.exporter_otlp_endpoint", "")
 	// Empty means "inherit the base endpoint"; registered anyway because
 	// AutomaticEnv only resolves keys Viper already knows.
 	v.SetDefault("otel.exporter_otlp_traces_endpoint", "")

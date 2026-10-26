@@ -25,11 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           # Pinned to the version developers run locally, so CI and local
           # results never drift. Bump both together.
@@ -48,8 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
       - run: go run github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }} -quiet ./...
@@ -60,12 +60,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+      - run: go mod verify
       - run: go build ./...
       - run: go test -race ./...
+      # A tidy tree catches an accidental dependency change that go.sum alone
+      # would not reveal.
+      - run: go mod tidy && git diff --exit-code -- go.mod go.sum
 
   # Supersets the unit run: the integration tag adds testcontainers-backed
   # tests on top of everything above.
@@ -73,8 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
       - run: go test -race -tags integration ./... 2>&1 | tee /tmp/integration.log
@@ -90,8 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
       # Pinned, not @latest: an unpinned scanner turns an unrelated upstream
@@ -109,8 +113,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: sqlc-dev/setup-sqlc@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6 # v5
         with:
           sqlc-version: ${{ env.SQLC_VERSION }}
       - run: sqlc diff || (echo "sqlc-generated code is stale; run 'make sqlc'" && exit 1)
@@ -122,14 +126,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate Prometheus rules
         run: |
           docker run --rm \
             --entrypoint promtool \
             -v "$PWD/deploy:/deploy:ro" \
-            prom/prometheus:v3.14.0 \
+            prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0 \
             check rules /deploy/rules.yml
+
+  # Kustomize catches a broken manifest reference or patch before an operator
+  # finds out during a rollout. Schema validation belongs to the cluster's
+  # admission policy; this job checks that the base and migration overlay build.
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: kubectl kustomize deploy/k8s >/dev/null
+      - run: kubectl kustomize deploy/k8s/migrate >/dev/null
 
   # .env.example and internal/config drift apart silently otherwise: nothing
   # else in CI loads it, and a developer copying it to .env finds out first.
@@ -137,8 +152,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
       - run: go test -run 'TestShippedExampleEnvIsValid|TestExampleEnvHasNoUnknownKeys' ./internal/config/...
@@ -149,21 +164,27 @@ jobs:
   # pinned and working.
   docker:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           docker build \
             --build-arg VERSION="${{ github.ref_name }}" \
             --build-arg COMMIT="${{ github.sha }}" \
             --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -t go-boilerplate:ci .
+          docker build --target migrate -t go-boilerplate-migrate:ci .
       # Proves the entrypoint is runnable and that config validation passes on
-      # the built-in defaults — a bad COPY or a stray dependency on
-      # the build stage would otherwise only surface on first deploy.
+      # a development config — a bad COPY or a stray dependency on the build
+      # stage would otherwise only surface on first deploy.
       - name: Smoke test the image
         run: |
           output=$(docker run --rm \
+            -e SERVICE_ENV=development \
             -e POSTGRES_DSN="postgres://app:app@127.0.0.1:59999/app?sslmode=disable" \
             -e OTEL_SDK_DISABLED=true \
             -e REDIS_MODE=disabled \
@@ -173,3 +194,53 @@ jobs:
           # Reaching the Postgres dial means config loaded and the app booted.
           echo "$output" | grep -q "connect postgres" \
             || (echo "::error::image did not reach the postgres connect step" && exit 1)
+
+          migrate_output=$(docker run --rm \
+            -e SERVICE_ENV=development \
+            -e POSTGRES_DSN="postgres://app:app@127.0.0.1:59999/app?sslmode=disable" \
+            go-boilerplate-migrate:ci 2>&1 || true)
+          echo "$migrate_output"
+          echo "$migrate_output" | grep -q "connect postgres" \
+            || (echo "::error::migration image did not reach the postgres connect step" && exit 1)
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: go-boilerplate:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - name: Scan repository for secrets and misconfiguration
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+      - name: Generate SBOM
+        uses: anchore/sbom-action@fffec3d851af758d56fee099cf3fbf8aa8779843 # v0.24.3
+        with:
+          image: go-boilerplate:ci
+          format: spdx-json
+          artifact-name: go-boilerplate.spdx.json
+          output-file: go-boilerplate.spdx.json
+          # Fork PRs get a read-only token, so only push runs may upload.
+          upload-artifact: "${{ github.event_name == 'push' }}"
+      # Keyless signing needs OIDC, which pull requests from forks do not get.
+      # The artifact is still generated there; only the signature is skipped.
+      - name: Install cosign
+        if: github.event_name == 'push'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign SBOM
+        if: github.event_name == 'push'
+        run: cosign sign-blob --yes --output-signature go-boilerplate.spdx.sig go-boilerplate.spdx.json
+      - name: Upload signed SBOM
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-boilerplate-sbom-signed
+          path: |
+            go-boilerplate.spdx.json
+            go-boilerplate.spdx.sig

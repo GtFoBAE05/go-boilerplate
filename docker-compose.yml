@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
@@ -18,7 +18,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:d9436322172a5b482c187bf1f363d3c4fea086fcca6b9c8a94de8f0f39ed3193
     ports:
       # Host port 6380 to avoid colliding with a natively installed Redis.
       - "6380:6379"
@@ -29,7 +29,7 @@ services:
       retries: 5
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.163.2
+    image: otel/opentelemetry-collector-contrib:0.163.2@sha256:7f22d2a6748110ffb6a59bc0df448bccbf501cdb667d610ede4c61d3863d5849
     command: ["--config=/etc/otel-collector.yaml"]
     volumes:
       - ./deploy/otel-collector.yaml:/etc/otel-collector.yaml:ro
@@ -41,7 +41,7 @@ services:
       - jaeger
 
   jaeger:
-    image: cr.jaegertracing.io/jaegertracing/jaeger:2.22.0
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.22.0@sha256:836b967b5abcf1f7758066aa6b348619267a2f1459f72d472840570f9bd88a17
     command: ["--config", "/etc/jaeger.yaml"]
     volumes:
       - ./deploy/jaeger.yaml:/etc/jaeger.yaml:ro
@@ -50,7 +50,7 @@ services:
       # 4317 not exposed to host — collector talks to jaeger internally
 
   prometheus:
-    image: prom/prometheus:v3.14.0
+    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     ports:
       - "9090:9090" # UI: http://localhost:9090
     volumes:

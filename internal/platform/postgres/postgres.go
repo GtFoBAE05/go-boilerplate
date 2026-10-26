@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/exaring/otelpgx"
@@ -28,6 +29,46 @@ func MinConns(n int32) Option {
 // MaxConnLifetime retires a connection after d, regardless of health.
 func MaxConnLifetime(d time.Duration) Option {
 	return func(c *pgxpool.Config) { c.MaxConnLifetime = d }
+}
+
+// MaxConnLifetimeJitter spreads retirements around MaxConnLifetime so replicas
+// do not reconnect in lockstep.
+func MaxConnLifetimeJitter(d time.Duration) Option {
+	return func(c *pgxpool.Config) { c.MaxConnLifetimeJitter = d }
+}
+
+// StatementTimeout sets Postgres's server-side per-statement deadline.
+func StatementTimeout(d time.Duration) Option {
+	return func(c *pgxpool.Config) { setRuntimeMillis(c, "statement_timeout", d) }
+}
+
+// LockTimeout bounds how long a statement waits for a lock.
+func LockTimeout(d time.Duration) Option {
+	return func(c *pgxpool.Config) { setRuntimeMillis(c, "lock_timeout", d) }
+}
+
+// IdleInTransactionTimeout reaps a transaction abandoned by a dead client.
+func IdleInTransactionTimeout(d time.Duration) Option {
+	return func(c *pgxpool.Config) {
+		setRuntimeMillis(c, "idle_in_transaction_session_timeout", d)
+	}
+}
+
+// ApplicationName labels this process in pg_stat_activity and slow-query logs.
+func ApplicationName(name string) Option {
+	return func(c *pgxpool.Config) {
+		if c.ConnConfig.RuntimeParams == nil {
+			c.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		c.ConnConfig.RuntimeParams["application_name"] = name
+	}
+}
+
+func setRuntimeMillis(c *pgxpool.Config, key string, d time.Duration) {
+	if c.ConnConfig.RuntimeParams == nil {
+		c.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	c.ConnConfig.RuntimeParams[key] = strconv.FormatInt(d.Milliseconds(), 10)
 }
 
 // QueryExecMode selects pgx's statement protocol by name. An unknown name is

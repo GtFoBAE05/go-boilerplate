@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
@@ -28,6 +31,11 @@ func isProbe(path string) bool {
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Echo the ID before the handler runs, so even an early error or
+			// panic response carries it.
+			if id := middleware.GetReqID(r.Context()); id != "" {
+				w.Header().Set("X-Request-Id", id)
+			}
 			if isProbe(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
@@ -104,6 +112,93 @@ func validRequestID(id string) bool {
 		}
 	}
 	return true
+}
+
+func parseTrustedProxyCIDRs(value string) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, raw := range strings.Split(value, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy CIDR %q: %w", raw, err)
+		}
+		nets = append(nets, ipNet)
+	}
+	return nets, nil
+}
+
+// trustedProxy rewrites RemoteAddr from X-Forwarded-For only when the TCP peer
+// is a configured proxy. Without this, every request behind an ingress shares
+// one rate-limit bucket; trusting the header unconditionally lets clients spoof
+// their way around it.
+func trustedProxy(nets []*net.IPNet) func(http.Handler) http.Handler {
+	if len(nets) == 0 {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ip := forwardedClientIP(r, nets); ip != "" {
+				r.RemoteAddr = net.JoinHostPort(ip, "0")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// forwardedClientIP walks X-Forwarded-For from the right, skipping trusted
+// proxies. The first untrusted hop is the client. A malformed hop falls back to
+// the peer rather than guessing.
+func forwardedClientIP(r *http.Request, nets []*net.IPNet) string {
+	peer := peerIP(r.RemoteAddr)
+	if peer == nil || !ipInNets(peer, nets) {
+		return ""
+	}
+	values := r.Header.Values("X-Forwarded-For")
+	if len(values) == 0 {
+		return ""
+	}
+	parts := strings.Split(strings.Join(values, ","), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := parseForwardedIP(strings.TrimSpace(parts[i]))
+		if ip == nil {
+			return ""
+		}
+		if !ipInNets(ip, nets) {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+func peerIP(remoteAddr string) net.IP {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	return net.ParseIP(strings.Trim(host, "[]"))
+}
+
+func parseForwardedIP(value string) net.IP {
+	if ip := net.ParseIP(value); ip != nil {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func levelFor(status int) slog.Level {

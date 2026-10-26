@@ -36,6 +36,9 @@ type ServerConfig struct {
 	RequestTimeout time.Duration `mapstructure:"request_timeout"`
 	// DrainDelay is how long /readyz reports 503 before shutdown; 0 disables it.
 	DrainDelay time.Duration `mapstructure:"drain_delay"`
+	// TrustedProxyCIDRs is a comma-separated list of proxy CIDRs whose
+	// X-Forwarded-For header is trusted. Empty disables forwarded-header trust.
+	TrustedProxyCIDRs string `mapstructure:"trusted_proxy_cidrs"`
 }
 
 // PprofConfig gates the loopback-only profiling listener. Disabled means no
@@ -49,10 +52,20 @@ type PprofConfig struct {
 
 // PostgresConfig holds the pgx pool settings and startup-migration flag.
 type PostgresConfig struct {
-	DSN             string        `mapstructure:"dsn"`
+	DSN string `mapstructure:"dsn"`
+	// MigrationDSN is used only by cmd/migrate. Production should point it at a
+	// role with DDL rights, keeping the runtime role DML-only.
+	MigrationDSN    string        `mapstructure:"migration_dsn"`
 	MaxConns        int32         `mapstructure:"max_conns"`
 	MinConns        int32         `mapstructure:"min_conns"`
 	MaxConnLifetime time.Duration `mapstructure:"max_conn_lifetime"`
+	// MaxConnLifetimeJitter spreads reconnects so replicas do not stampede.
+	MaxConnLifetimeJitter time.Duration `mapstructure:"max_conn_lifetime_jitter"`
+	// StatementTimeout, LockTimeout, and IdleInTransactionTimeout are enforced
+	// by Postgres itself, so a canceled client cannot leave work running.
+	StatementTimeout         time.Duration `mapstructure:"statement_timeout"`
+	LockTimeout              time.Duration `mapstructure:"lock_timeout"`
+	IdleInTransactionTimeout time.Duration `mapstructure:"idle_in_transaction_timeout"`
 	// Migrate runs embedded goose migrations at boot. Off by default so
 	// replicas cannot race on rollout; .env.example enables it for local dev.
 	Migrate bool `mapstructure:"migrate"`
@@ -67,9 +80,14 @@ type PostgresConfig struct {
 func (p PostgresConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("dsn", platformconfig.RedactDSN(p.DSN)),
+		slog.String("migration_dsn", platformconfig.RedactDSN(p.MigrationDSN)),
 		slog.Int64("max_conns", int64(p.MaxConns)),
 		slog.Int64("min_conns", int64(p.MinConns)),
 		slog.Duration("max_conn_lifetime", p.MaxConnLifetime),
+		slog.Duration("max_conn_lifetime_jitter", p.MaxConnLifetimeJitter),
+		slog.Duration("statement_timeout", p.StatementTimeout),
+		slog.Duration("lock_timeout", p.LockTimeout),
+		slog.Duration("idle_in_transaction_timeout", p.IdleInTransactionTimeout),
 		slog.Bool("migrate", p.Migrate),
 		slog.String("query_exec_mode", p.QueryExecMode),
 	)

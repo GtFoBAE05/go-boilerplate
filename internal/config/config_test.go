@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -75,13 +76,19 @@ func TestExampleEnvHasNoUnknownKeys(t *testing.T) {
 	}
 }
 
-// Defaults alone (no .env present) must be valid, since that is what a
-// container setting only what it needs runs on.
-func TestDefaultsAreValid(t *testing.T) {
+// A deployment ships no file, so the two values that cannot have a safe
+// universal default must be supplied explicitly.
+func TestDefaultsRequireExplicitPostgresAndOTel(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	if _, err := Load(); err != nil {
-		t.Fatalf("defaults are invalid: %v", err)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("want missing DSN and OTLP endpoint errors, got nil")
+	}
+	for _, want := range []string{"postgres.dsn", "otel.exporter_otlp_traces_endpoint"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("want error mentioning %q, got %v", want, err)
+		}
 	}
 }
 
@@ -95,6 +102,8 @@ func TestEnvironmentBeatsDotEnv(t *testing.T) {
 	}
 	t.Chdir(dir)
 	t.Setenv("SERVER_PORT", "2222")
+	t.Setenv("POSTGRES_DSN", testProductionDSN)
+	t.Setenv("OTEL_SDK_DISABLED", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -146,8 +155,12 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"pprof port collides", func(c *Config) { c.Pprof = PprofConfig{Enabled: true, Port: c.Server.Port} }, "pprof.port"},
 		{"pprof port out of range", func(c *Config) { c.Pprof = PprofConfig{Enabled: true, Port: 70000} }, "pprof.port"},
 		{"pprof port unset while enabled", func(c *Config) { c.Pprof = PprofConfig{Enabled: true} }, "pprof.port"},
+		{"bad trusted proxy CIDR", func(c *Config) { c.Server.TrustedProxyCIDRs = "not-a-cidr" }, "trusted_proxy_cidrs"},
 		{"empty dsn", func(c *Config) { c.Postgres.DSN = "  " }, "postgres.dsn"},
 		{"min above max conns", func(c *Config) { c.Postgres.MinConns = 99 }, "min_conns"},
+		{"negative max conn lifetime", func(c *Config) { c.Postgres.MaxConnLifetime = -time.Hour }, "max_conn_lifetime"},
+		{"jitter above lifetime", func(c *Config) { c.Postgres.MaxConnLifetimeJitter = 2 * time.Hour }, "max_conn_lifetime_jitter"},
+		{"zero statement timeout", func(c *Config) { c.Postgres.StatementTimeout = 0 }, "statement_timeout"},
 		{"bad exec mode", func(c *Config) { c.Postgres.QueryExecMode = "prepared" }, "query_exec_mode"},
 		{"bad redis mode", func(c *Config) { c.Redis.Mode = "maybe" }, "redis.mode"},
 		{"production optional redis with limiter", func(c *Config) { c.Redis.Mode = RedisModeOptional }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
@@ -203,6 +216,8 @@ func TestLoadProductionRateLimitRedisGuard(t *testing.T) {
 			t.Setenv("REDIS_MODE", tt.redisMode)
 			t.Setenv("RATELIMIT_ENABLED", tt.enabled)
 			t.Setenv("RATELIMIT_ALLOW_PROCESS_LOCAL", tt.allowLocal)
+			t.Setenv("POSTGRES_DSN", testProductionDSN)
+			t.Setenv("OTEL_SDK_DISABLED", "true")
 
 			_, err := Load()
 			if tt.wantErr == "" {
@@ -257,6 +272,8 @@ func TestMetricExportIntervalIsMilliseconds(t *testing.T) {
 		t.Fatalf("write .env: %v", err)
 	}
 	t.Chdir(dir)
+	t.Setenv("POSTGRES_DSN", testProductionDSN)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
 	cfg, err := Load()
 	if err != nil {
@@ -284,6 +301,8 @@ func TestDisabledOTelSettingsAreInert(t *testing.T) {
 // migration and a per-process limiter must be opt-in.
 func TestProductionDefaultsAreSafe(t *testing.T) {
 	t.Chdir(t.TempDir())
+	t.Setenv("POSTGRES_DSN", testProductionDSN)
+	t.Setenv("OTEL_SDK_DISABLED", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -310,6 +329,78 @@ func TestProductionRejectsBootMigrations(t *testing.T) {
 	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "postgres.migrate") {
 		t.Fatalf("want postgres.migrate error, got %v", err)
 	}
+}
+
+func TestProductionRejectsInsecurePostgresTLS(t *testing.T) {
+	for _, dsn := range []string{
+		"postgres://app:app@localhost:5433/app?sslmode=disable",
+		"postgres://app:app@localhost:5433/app?sslmode=require",
+	} {
+		cfg := validConfig()
+		cfg.Postgres.DSN = dsn
+		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "postgres.dsn") {
+			t.Fatalf("want postgres.dsn TLS error for %q, got %v", dsn, err)
+		}
+	}
+}
+
+func TestPostgresTLSRequiresVerification(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		dsn  string
+		ok   bool
+	}{
+		{"disable", "postgres://app:app@localhost:5433/app?sslmode=disable", false},
+		{"require", "postgres://app:app@localhost:5433/app?sslmode=require", false},
+		{"prefer", "postgres://app:app@localhost:5433/app?sslmode=prefer", false},
+		{"verify-ca", "postgres://app:app@localhost:5433/app?sslmode=verify-ca", true},
+		{"verify-full", testProductionDSN, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePostgresTLS(tt.dsn)
+			if tt.ok && err != nil {
+				t.Fatalf("want nil, got %v", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("want an error, got nil")
+			}
+		})
+	}
+}
+
+func TestLoadMigrate(t *testing.T) {
+	t.Run("development falls back to runtime DSN", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvDevelopment)
+		t.Setenv("POSTGRES_DSN", "postgres://app:app@localhost:5433/app?sslmode=disable")
+		if _, err := LoadMigrate(); err != nil {
+			t.Fatalf("LoadMigrate: %v", err)
+		}
+	})
+	t.Run("production requires a dedicated migration DSN", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvProduction)
+		t.Setenv("POSTGRES_DSN", testProductionDSN)
+		if _, err := LoadMigrate(); err == nil || !strings.Contains(err.Error(), "migration_dsn") {
+			t.Fatalf("want migration_dsn error, got %v", err)
+		}
+	})
+	t.Run("production rejects an unverified migration DSN", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvProduction)
+		t.Setenv("POSTGRES_MIGRATION_DSN", "postgres://migrator:secret@localhost:5433/app?sslmode=require")
+		if _, err := LoadMigrate(); err == nil || !strings.Contains(err.Error(), "migration_dsn") {
+			t.Fatalf("want migration_dsn TLS error, got %v", err)
+		}
+	})
+	t.Run("production accepts a TLS-verified migration DSN", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvProduction)
+		t.Setenv("POSTGRES_MIGRATION_DSN", testProductionDSN)
+		if _, err := LoadMigrate(); err != nil {
+			t.Fatalf("LoadMigrate: %v", err)
+		}
+	})
 }
 
 func TestProductionRejectsInsecureRedisTLS(t *testing.T) {
@@ -351,12 +442,21 @@ func TestRedactDSN(t *testing.T) {
 // LogValue is the guard that stops a whole-config log line from leaking
 // credentials, so assert the secret is absent from the rendered value.
 func TestPostgresLogValueRedactsPassword(t *testing.T) {
-	p := PostgresConfig{DSN: "postgres://app:s3cret@localhost:5433/app", QueryExecMode: "exec"}
+	p := PostgresConfig{
+		DSN:           "postgres://app:s3cret@localhost:5433/app",
+		MigrationDSN:  "postgres://migrator:m3cret@localhost:5433/app",
+		QueryExecMode: "exec",
+	}
 
-	if rendered := p.LogValue().String(); strings.Contains(rendered, "s3cret") {
-		t.Fatalf("password leaked in log value: %s", rendered)
+	rendered := p.LogValue().String()
+	for _, secret := range []string{"s3cret", "m3cret"} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("password %q leaked in log value: %s", secret, rendered)
+		}
 	}
 }
+
+const testProductionDSN = "postgres://app:app@localhost:5433/app?sslmode=verify-full"
 
 func TestRedisLogValueRedactsPassword(t *testing.T) {
 	r := RedisConfig{Mode: RedisModeOptional, Addr: "localhost:6380", Password: "s3cret"}
@@ -373,8 +473,10 @@ func validConfig() *Config {
 		Service: ServiceConfig{Name: "test", Env: EnvProduction},
 		Server:  ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, ShutdownTimeout: 20 * time.Second, RequestTimeout: 20 * time.Second, DrainDelay: 5 * time.Second},
 		Postgres: PostgresConfig{
-			DSN: "postgres://app:app@localhost:5433/app", MaxConns: 25, MinConns: 2,
-			MaxConnLifetime: time.Hour, QueryExecMode: "cache_statement",
+			DSN: testProductionDSN, MaxConns: 25, MinConns: 2,
+			MaxConnLifetime: time.Hour, MaxConnLifetimeJitter: 5 * time.Minute,
+			StatementTimeout: 10 * time.Second, LockTimeout: 5 * time.Second,
+			IdleInTransactionTimeout: 30 * time.Second, QueryExecMode: "cache_statement",
 		},
 		// This fixture is production-shaped, so its limiter uses shared Redis.
 		Redis: RedisConfig{
@@ -389,5 +491,31 @@ func validConfig() *Config {
 		},
 		Log:       LogConfig{Level: "info", Format: "json"},
 		RateLimit: RateLimitConfig{Enabled: true, Requests: 40, Window: time.Second},
+	}
+}
+
+// A hardcoded job label silently disables AppMetricsMissing after a rename.
+// The rule file is static, so CI is the only place that can catch the mismatch.
+func TestAlertRulesUseServiceName(t *testing.T) {
+	v := viper.New()
+	setDefaults(v)
+	serviceName := v.GetString("service.name")
+
+	rules, err := os.ReadFile("../../deploy/rules.yml")
+	if err != nil {
+		t.Fatalf("read rules: %v", err)
+	}
+	if strings.Contains(string(rules), "docs/runbook.md") {
+		t.Fatal("rules still link to docs/runbook.md; point them at README.md")
+	}
+
+	jobRE := regexp.MustCompile(`job="([^"]+)"`)
+	for _, match := range jobRE.FindAllStringSubmatch(string(rules), -1) {
+		if match[1] == "otel-collector" {
+			continue
+		}
+		if match[1] != serviceName {
+			t.Errorf("rule job %q does not match service.name %q", match[1], serviceName)
+		}
 	}
 }

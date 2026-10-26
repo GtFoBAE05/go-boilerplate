@@ -13,7 +13,7 @@ Go 1.27 · chi · pgx/sqlc · goose · Redis · OpenTelemetry · `log/slog`
 Prerequisites: Go 1.27.3+ and Docker Compose.
 
 ```bash
-cp .env.example .env      # local settings; no .env means production defaults
+cp .env.example .env      # local settings; no .env means production defaults (and no DSN)
 docker compose up -d      # postgres, redis, jaeger, prometheus, otel-collector
 go run ./cmd/api          # applies migrations when POSTGRES_MIGRATE=true
 ```
@@ -26,7 +26,8 @@ go run ./cmd/api          # applies migrations when POSTGRES_MIGRATE=true
 
 Postgres uses host port **5433** and Redis **6380** to avoid native installs.
 `.env.example` enables debug logs, optional Redis, and migrations on boot; the
-built-in defaults are production-safe and reject boot-time migrations in
+built-in defaults are production-safe, require an explicit DSN (and an OTLP
+endpoint while telemetry is enabled), and reject boot-time migrations in
 production.
 
 ```bash
@@ -40,8 +41,10 @@ curl -X POST localhost:8080/api/v1/users \
 1. Rename the module with `go mod edit -module github.com/you/your-service`, then
    replace the old import path across the repository.
 2. Update `.golangci.yml` (`module-path`, `local-prefixes`), the three `-ldflags`
-   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, image names, and the CI
-   badge/repository URLs.
+   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, image names in
+   `deploy/k8s/`, the `job` label in `deploy/rules.yml`, and the CI
+   badge/repository URLs. `TestAlertRulesUseServiceName` fails if the rule label
+   and `SERVICE_NAME` drift apart.
 3. Keep the `user` vertical as the reference, or delete it once your first real
    resource is in place.
 
@@ -54,10 +57,13 @@ curl -X POST localhost:8080/api/v1/users \
   uses a shared counter.
 - **Observability** — OpenTelemetry traces and metrics over OTLP, plus
   trace-correlated `slog` logs.
-- **Hardened HTTP** — strict JSON, 1 MiB body cap, deadlines, per-IP limits, and
-  one response envelope.
-- **Guardrail CI** — lint, `gosec`, race tests, integration tests,
-  `govulncheck`, sqlc drift, `promtool`, and a Docker smoke test.
+- **Hardened HTTP** — strict JSON and content type, 1 MiB body cap, deadlines,
+  trusted-proxy-aware per-IP limits, and one response envelope.
+- **Safe data access** — server-side statement/lock/idle timeouts, rollback
+  cleanup after a canceled request, and an advisory-locked migration job.
+- **Guardrail CI** — SHA-pinned actions, digest-pinned images, lint, `gosec`,
+  race and integration tests, `govulncheck`, sqlc drift, `promtool`, Trivy,
+  SBOM generation/signing, and a Docker smoke test.
 
 ## Architecture
 
@@ -76,7 +82,8 @@ database, services never touch HTTP, and services never call another service.
 Domain errors carry a `Kind` and `Code`, so the HTTP layer maps them generically.
 
 ```text
-cmd/api/              entry point
+cmd/api/              HTTP entry point
+cmd/migrate/          advisory-locked migration job
 internal/app/         lifecycle + dependency wiring
 internal/config/      config, defaults, validation
 internal/platform/    generic infra: postgres, redis, ratelimit, telemetry, errors
@@ -85,7 +92,7 @@ internal/service/     use-case services (user is the example)
 internal/handler/     HTTP plumbing + resource handlers
 internal/server/      router, middleware, http.Server, pprof
 db/                   migrations and sqlc queries
-deploy/               collector, Jaeger, Prometheus, alert rules
+deploy/               collector, Jaeger, Prometheus, alert rules, k8s base
 ```
 
 `internal/platform/` may not import application code; `depguard` enforces it.
@@ -128,11 +135,13 @@ structured context.
 | Area | Behavior |
 | --- | --- |
 | Body | 1 MiB cap; unknown/duplicate JSON fields rejected; validation failures return 422 |
+| Content type | JSON writes require `application/json` or `+json`; otherwise 415 |
 | Pagination | `limit` 1–100, non-negative `offset`; malformed values return 422 |
 | Rate limit | Per client IP; 429 over limit; Redis failure fails closed with 503 |
+| Proxies | `X-Forwarded-For` is honored only when the TCP peer is in `SERVER_TRUSTED_PROXY_CIDRS` |
 | Timeouts | `server.request_timeout` aborts downstream work and returns 504 `TIMEOUT` |
-| Headers | `Cache-Control: no-store`, `nosniff`, `Allow` on 405, `Retry-After` on 429/503 |
-| Request ID | Short alphanumeric IDs (plus `-_.`) are kept; others are replaced |
+| Headers | `Cache-Control: no-store` on every response, `nosniff`, `Allow` on 405, `Retry-After` on 429/503 |
+| Request ID | A valid `X-Request-Id` is kept and echoed; otherwise one is generated and echoed |
 
 Business rules are validated in the handler, repeated in the service, and
 enforced by the database (`CHECK`, `lower(email)` unique index).
@@ -140,8 +149,8 @@ enforced by the database (`CHECK`, `lower(email)` unique index).
 ### Error codes
 
 Transport codes live in `internal/handler`: `BAD_REQUEST`, `VALIDATION_FAILED`,
-`NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`,
-`RATE_LIMIT_UNAVAILABLE`, `TIMEOUT`, `INTERNAL`.
+`NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`,
+`RATE_LIMITED`, `RATE_LIMIT_UNAVAILABLE`, `TIMEOUT`, `INTERNAL`.
 
 Domain codes live with the error:
 
@@ -159,7 +168,11 @@ validated at boot; all errors are reported together.
 
 Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=required`,
 `POSTGRES_MIGRATE=false`, JSON logs at `info`, `PPROF_ENABLED=false`.
-`.env.example` is the local-development opt-in.
+There is deliberately no default `POSTGRES_DSN`, and no default OTLP endpoint
+while telemetry is enabled: a deployment must set them explicitly. Production
+rejects a Postgres DSN that does not verify the server certificate
+(`sslmode=verify-ca` or `verify-full`). `.env.example` is the local-development
+opt-in.
 
 Gotchas:
 
@@ -170,6 +183,13 @@ Gotchas:
   is not read because `SERVICE_NAME` owns identity.
 - Behind pgbouncer or RDS Proxy, set `POSTGRES_QUERY_EXEC_MODE=exec` or
   `simple_protocol`; `cache_statement` needs server-side prepared statements.
+- `POSTGRES_STATEMENT_TIMEOUT`, `POSTGRES_LOCK_TIMEOUT`, and
+  `POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT` are enforced by Postgres, so canceled
+  requests cannot leave queries or locks behind. `POSTGRES_MAX_CONN_LIFETIME_JITTER`
+  spreads reconnects across replicas.
+- `SERVER_TRUSTED_PROXY_CIDRS` is empty by default. Set it to the ingress or
+  load-balancer CIDRs (comma-separated) so rate limiting keys off the real
+  client; never trust `X-Forwarded-For` from an arbitrary peer.
 
 Dependencies:
 
@@ -180,8 +200,11 @@ Dependencies:
   because the limiter fails closed.
 - Production rate limiting needs a shared counter. Production with optional or
   disabled Redis fails boot unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true`.
-- Production migrations belong to the deploy pipeline, not the app. Redis TLS
-  verification is on by default and skipping it is rejected in production.
+- Redis TLS verification is on by default; skipping it is rejected in
+  production.
+- Production migrations belong to the deploy pipeline, not the app.
+- `POSTGRES_MIGRATION_DSN` is used only by `cmd/migrate`. In production it must
+  point at a DDL role, so the runtime role never needs `CREATE`/`ALTER`/`DROP`.
 
 ## Database and migrations
 
@@ -189,16 +212,56 @@ Goose SQL lives in `db/migrations/`, is embedded in the binary, and is applied a
 boot only when `POSTGRES_MIGRATE=true`. Production rejects that setting.
 
 ```bash
-make migrate-up
+make migrate-up         # local convenience (goose CLI, DB_DSN)
 make migrate-status
 make migrate-down       # roll back one migration
 
-# production, from a dedicated job
-DB_DSN='postgres://...' make migrate-up
+# production: a dedicated job, serialized by a Postgres advisory lock
+go run ./cmd/migrate
+docker build --target migrate -t registry.example.com/app-migrate:VERSION .
 ```
 
-The database role needs DDL permissions. sqlc reads the migrations as its
-schema, so generated code stays in sync.
+`cmd/migrate` uses `POSTGRES_MIGRATION_DSN` when set, otherwise `POSTGRES_DSN`
+in development. In production the migration DSN is required and must verify TLS.
+The advisory lock makes concurrent rollout jobs wait instead of racing.
+`deploy/postgres/roles.sql` is a starting point for splitting the DDL role from
+the runtime DML role. sqlc reads the migrations as its schema, so generated code
+stays in sync.
+
+## Kubernetes
+
+`deploy/k8s/` is a kustomize base with a two-replica Deployment, probes,
+resource requests/limits, a PodDisruptionBudget, an HPA, and a default-deny
+NetworkPolicy. The migration Job is a separate overlay in `deploy/k8s/migrate`
+so it can run before the rollout. It is a starting point: replace the image
+names, ingress namespace, and RFC1918 egress ranges with your environment's.
+
+```bash
+# 1. Create the namespace, service account, config, and secrets. Copy the
+#    example, edit the copy, and keep it out of git (secret.yaml is ignored).
+cp deploy/k8s/secret.example.yaml deploy/k8s/secret.yaml
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -f deploy/k8s/serviceaccount.yaml
+kubectl apply -f deploy/k8s/configmap.yaml
+kubectl apply -f deploy/k8s/secret.yaml
+
+# 2. Run migrations before the rollout. Delete a completed Job first so a new
+#    image actually runs; wait for completion before touching the Deployment.
+kubectl -n go-boilerplate delete job go-boilerplate-migrate --ignore-not-found
+kubectl apply -k deploy/k8s/migrate
+kubectl -n go-boilerplate wait --for=condition=complete \
+  job/go-boilerplate-migrate --timeout=10m
+
+# 3. Apply the application.
+kubectl apply -k deploy/k8s
+```
+
+The Deployment's `terminationGracePeriodSeconds` is 35s, above the app's 5s
+drain delay plus 20s shutdown. Readiness uses `/readyz`; liveness uses
+`/healthz`, so a draining pod leaves rotation without being killed. The
+namespace enforces the restricted Pod Security Standard. The HPA needs
+metrics-server; the NetworkPolicy assumes an `ingress-nginx` namespace and
+private-range access to Postgres, Redis, and the OTLP collector.
 
 ## Observability
 
@@ -211,7 +274,12 @@ schema, so generated code stays in sync.
   `go tool pprof http://localhost:6060/debug/pprof/profile`.
 
 Push metrics have no `up` signal: a dead app and a dead collector look the same.
-`deploy/rules.yml` uses `AppMetricsMissing` and `CollectorDown` together.
+`deploy/rules.yml` uses `AppMetricsMissing` and `CollectorDown` together. Alert
+links below are the runbook sections in this README.
+
+SLO: 99.9% of API requests succeed (non-5xx) over 30 days, and p99 latency stays
+below 1s. Error-budget burn is evaluated over multiple windows: 14.4x over 5m and
+1h pages within 2m; 6x over 30m and 6h pages after 15m.
 
 | Series | Source | Answers |
 | --- | --- | --- |
@@ -223,6 +291,63 @@ Push metrics have no `up` signal: a dead app and a dead collector look the same.
 
 Keep labels bounded: `http_route` is the chi pattern, `instance` is the replica.
 Never label with a user id, email, or `trace_id`.
+
+## Runbook
+
+Metrics are pushed, not scraped, so the absence of data is ambiguous. Check
+`CollectorDown` and `AppMetricsMissing` together first; if both fire, the
+pipeline is broken and every other metric alert is blind rather than healthy.
+Request log lines carry `trace_id` and `span_id`; paste the `trace_id` into
+Jaeger. `target_info{service_version}` identifies the build behind a series, so
+a regression that starts at a version boundary is a rollback.
+
+### AppMetricsMissing
+
+No `go_goroutine_count` series for three minutes. The app, the collector, or the
+network between them is down. If `CollectorDown` also fires, restart the
+collector and verify Prometheus can scrape its exporter port. If only this alert
+fires, check the app's liveness probe and recent logs; Kubernetes should restart
+a wedged process. If both sides look healthy, inspect egress to
+`OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### CollectorDown
+
+Prometheus cannot scrape the collector (`up{job="otel-collector"} == 0`).
+Restart it and verify `/metrics` on its exporter port. If it is up but not
+scrapeable, check `deploy/prometheus.yml` and `honor_labels: true`. Treat other
+metric alerts' silence as unknown, not healthy, until this clears.
+
+### ErrorBudgetBurnFast
+
+More than 14.4x the 99.9% error budget is burning across both 5m and 1h. Break
+down by `http_route` and `http_response_status_code`, then follow a `trace_id`
+from the error logs. Check the most recent deploy first; roll back a regression
+that starts at a version boundary instead of debugging forward.
+
+### ErrorBudgetBurnSlow
+
+A 6x burn across 30m and 6h exhausts the monthly budget in about five days.
+Look for a steady background error rate introduced by a deploy, a dependency
+change, or a traffic shift. This is page-worthy because it is not self-limiting.
+
+### HighLatencyP99
+
+p99 is above the 1s SLO for ten minutes. Check
+`instance:pgxpool_connections:utilization` and `PostgresPoolStarved` first: an
+exhausted pool shows up as time spent acquiring a connection, not as an error.
+Then check Redis latency and the slowest `http_route`.
+
+### PostgresPoolSaturated
+
+A replica is using more than 90% of `POSTGRES_MAX_CONNS` for five minutes.
+Either raise the pool size or find the query holding connections; at 100% every
+new request queues.
+
+### PostgresPoolStarved
+
+Requests are waiting on an empty pool more than once per second. This is the
+leading indicator before saturation and latency breach. Find the slow query or
+the connection leak; raising `POSTGRES_MAX_CONNS` only moves the wall.
 
 ## Development
 
@@ -237,6 +362,7 @@ make vuln               # govulncheck
 make migrate-new name=x # scaffold a migration
 make build              # local binary with provenance
 make docker-build       # production image
+make docker-build-migrate # migration-only image
 ```
 
 Tool versions are pinned in the Makefile and CI; they stay out of `go.mod` so the
@@ -259,7 +385,7 @@ validates the alert rules with `promtool`.
 
 This template makes the decisions everyone agrees on and leaves the contested
 ones to you. Deliberately not included: authentication, Swagger/OpenAPI, mock
-generators, CORS/trusted-proxy handling, gRPC, queues, and workers.
+generators, CORS, gRPC, queues, and workers.
 
 The `user` vertical is the complete example: copy it, rename it, ship it. AI
 coding agents should read [AGENTS.md](AGENTS.md); this README is for humans.

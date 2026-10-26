@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: go-boilerplate
+  labels:
+    app.kubernetes.io/name: go-boilerplate
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: go-boilerplate
+      app.kubernetes.io/component: api

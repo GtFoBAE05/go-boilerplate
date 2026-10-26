@@ -29,6 +29,24 @@ groups:
             /
           sum by (job) (rate(http_server_request_duration_seconds_count[5m]))
 
+      - record: job:http_requests:error_ratio30m
+        expr: |
+          sum by (job) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[30m]))
+            /
+          sum by (job) (rate(http_server_request_duration_seconds_count[30m]))
+
+      - record: job:http_requests:error_ratio1h
+        expr: |
+          sum by (job) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[1h]))
+            /
+          sum by (job) (rate(http_server_request_duration_seconds_count[1h]))
+
+      - record: job:http_requests:error_ratio6h
+        expr: |
+          sum by (job) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[6h]))
+            /
+          sum by (job) (rate(http_server_request_duration_seconds_count[6h]))
+
       - record: job:http_request_duration_seconds:p99_5m
         expr: |
           histogram_quantile(0.99,
@@ -57,6 +75,9 @@ groups:
       #
       # The window must outlast OTEL_METRIC_EXPORT_INTERVAL by a comfortable
       # margin; at the 60s default, 3m is two missed exports.
+      # The job label is pinned to SERVICE_NAME by TestAlertRulesUseServiceName;
+      # renaming the service without updating this rule fails CI instead of
+      # silently disabling the alert.
       - alert: AppMetricsMissing
         expr: absent(go_goroutine_count{job="go-boilerplate"})
         for: 3m
@@ -65,7 +86,7 @@ groups:
         annotations:
           summary: "No metrics from go-boilerplate for 3 minutes"
           description: "The app, the collector, or the path between them is broken. Check CollectorDown first — if it is also firing, this is the collector, not the app."
-          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/docs/runbook.md#appmetricsmissing"
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#appmetricsmissing"
 
       # The collector is the only real scrape target left, so this is the one
       # alert that still rests on `up`. It fires for a pipeline outage, during
@@ -78,17 +99,37 @@ groups:
         annotations:
           summary: "OTLP collector is not scrapeable"
           description: "All metrics stop at once while this is firing; treat other alerts' silence as unknown, not healthy."
-          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/docs/runbook.md#collectordown"
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#collectordown"
 
-      - alert: HighErrorRate
-        expr: job:http_requests:error_ratio5m > 0.05
-        for: 5m
+      # Multi-window burn rate for a 99.9% availability SLO. 14.4x consumes
+      # 2% of the monthly budget in one hour; requiring both windows to agree
+      # suppresses short spikes. The slow pair catches a lower burn that still
+      # exhausts the budget within days.
+      - alert: ErrorBudgetBurnFast
+        expr: |
+          job:http_requests:error_ratio5m > (14.4 * 0.001)
+          and
+          job:http_requests:error_ratio1h > (14.4 * 0.001)
+        for: 2m
         labels:
           severity: page
         annotations:
-          summary: "{{ $value | humanizePercentage }} of requests are 5xx"
-          description: "Break down by http_route and http_response_status_code, then follow a trace_id from the error logs."
-          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/docs/runbook.md#higherrorrate"
+          summary: "Fast error-budget burn: {{ $value | humanizePercentage }} 5xx over 5m"
+          description: "The 99.9% monthly budget is being consumed at more than 14.4x. Break down by http_route and http_response_status_code, then follow a trace_id from the error logs."
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#errorbudgetburnfast"
+
+      - alert: ErrorBudgetBurnSlow
+        expr: |
+          job:http_requests:error_ratio30m > (6 * 0.001)
+          and
+          job:http_requests:error_ratio6h > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "Slow error-budget burn: {{ $value | humanizePercentage }} 5xx over 30m"
+          description: "A 6x burn exhausts the 99.9% monthly budget in about five days. Check whether a recent deploy introduced a steady background error rate."
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#errorbudgetburnslow"
 
       # 10m rather than 5m: latency alerts are the noisiest kind, and a slow
       # window that resolves itself is not worth waking someone for.
@@ -100,7 +141,7 @@ groups:
         annotations:
           summary: "p99 latency is {{ $value | humanizeDuration }}"
           description: "Check pool utilization first — an exhausted pool shows up as latency inside the acquire, not as an error."
-          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/docs/runbook.md#highlatencyp99"
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#highlatencyp99"
 
       - alert: PostgresPoolSaturated
         expr: instance:pgxpool_connections:utilization > 0.9
@@ -110,7 +151,7 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} is using {{ $value | humanizePercentage }} of its Postgres pool"
           description: "Either raise POSTGRES_MAX_CONNS or find the query holding connections; at 100% every new request queues."
-          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/docs/runbook.md#postgrespoolsaturated"
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#postgrespoolsaturated"
 
       # Waiting for a connection means the pool was empty at acquire time. This
       # is the leading indicator: it climbs before utilization pins at 1 and
@@ -123,4 +164,4 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} waits on an empty Postgres pool {{ $value | printf \"%.1f\" }} times/s"
           description: "Requests are queueing for a connection. Precedes PostgresPoolSaturated."
-          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/docs/runbook.md#postgrespoolstarved"
+          runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#postgrespoolstarved"

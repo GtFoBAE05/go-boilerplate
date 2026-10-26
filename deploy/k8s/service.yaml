@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-boilerplate
+  labels:
+    app.kubernetes.io/name: go-boilerplate
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: go-boilerplate
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

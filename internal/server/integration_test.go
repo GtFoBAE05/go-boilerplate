@@ -26,7 +26,7 @@ func setupServer(t *testing.T) http.Handler {
 	t.Helper()
 	ctx := context.Background()
 
-	ctr, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+	ctr, err := tcpostgres.Run(ctx, "postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab",
 		tcpostgres.WithDatabase("app"),
 		tcpostgres.WithUsername("app"),
 		tcpostgres.WithPassword("app"),

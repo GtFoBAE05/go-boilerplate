@@ -78,6 +78,11 @@ func Run(cfg *config.Config) error {
 		postgres.MaxConns(cfg.Postgres.MaxConns),
 		postgres.MinConns(cfg.Postgres.MinConns),
 		postgres.MaxConnLifetime(cfg.Postgres.MaxConnLifetime),
+		postgres.MaxConnLifetimeJitter(cfg.Postgres.MaxConnLifetimeJitter),
+		postgres.StatementTimeout(cfg.Postgres.StatementTimeout),
+		postgres.LockTimeout(cfg.Postgres.LockTimeout),
+		postgres.IdleInTransactionTimeout(cfg.Postgres.IdleInTransactionTimeout),
+		postgres.ApplicationName(cfg.Service.Name),
 		postgres.QueryExecMode(cfg.Postgres.QueryExecMode),
 	)
 	if err != nil {

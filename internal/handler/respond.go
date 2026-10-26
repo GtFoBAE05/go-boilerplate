@@ -24,12 +24,13 @@ import (
 // the domain errors themselves (see service.Error) so this list never has to
 // grow when a resource is added.
 const (
-	CodeBadRequest       = "BAD_REQUEST"
-	CodeValidationFailed = "VALIDATION_FAILED"
-	CodeNotFound         = "NOT_FOUND"
-	CodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
-	CodePayloadTooLarge  = "PAYLOAD_TOO_LARGE"
-	CodeRateLimited      = "RATE_LIMITED"
+	CodeBadRequest           = "BAD_REQUEST"
+	CodeValidationFailed     = "VALIDATION_FAILED"
+	CodeNotFound             = "NOT_FOUND"
+	CodeMethodNotAllowed     = "METHOD_NOT_ALLOWED"
+	CodePayloadTooLarge      = "PAYLOAD_TOO_LARGE"
+	CodeUnsupportedMediaType = "UNSUPPORTED_MEDIA_TYPE"
+	CodeRateLimited          = "RATE_LIMITED"
 	// CodeRateLimitUnavailable indicates the shared Redis limiter could not
 	// check a request, so the request was refused rather than let through.
 	CodeRateLimitUnavailable = "RATE_LIMIT_UNAVAILABLE"
@@ -62,11 +63,16 @@ type errorEnvelope struct {
 	Error errorBody `json:"error"`
 }
 
+func setResponseHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
 // WriteJSON writes v as-is for infrastructure endpoints; API handlers use
 // OK/OKList. v is marshalled into a buffer first: encoding straight to the
 // ResponseWriter would commit a 200 before a marshal failure could be reported.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setResponseHeaders(w)
 	if v == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -77,7 +83,6 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(&buf).Encode(v); err != nil {
 		// Nothing has been written yet, so a clean 500 is still possible.
 		// Hand-rolled body: re-entering WriteJSON could fail the same way.
-		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":{"code":"INTERNAL","message":"internal server error"}}`))
@@ -103,20 +108,17 @@ func OKList(w http.ResponseWriter, data any, meta Meta) {
 // NoContent writes a 204 through this file so every response shares the same
 // header policy.
 func NoContent(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setResponseHeaders(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // WriteError writes an error envelope: {"error": {"code", "message"}}.
 func WriteError(w http.ResponseWriter, status int, code, message string) {
-	w.Header().Set("Cache-Control", "no-store")
 	WriteJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message}})
 }
 
 // writeValidationError adds per-field messages; used by DecodeValid.
 func writeValidationError(w http.ResponseWriter, fields map[string]string) {
-	w.Header().Set("Cache-Control", "no-store")
 	WriteJSON(w, http.StatusUnprocessableEntity, errorEnvelope{Error: errorBody{
 		Code:    CodeValidationFailed,
 		Message: "validation failed",
@@ -189,7 +191,6 @@ func WriteServiceError(w http.ResponseWriter, r *http.Request, log *slog.Logger,
 			body.Fields = fields
 			body.Details = nil
 		}
-		w.Header().Set("Cache-Control", "no-store")
 		WriteJSON(w, statusForKind(domainErr.Kind), errorEnvelope{Error: body})
 		return
 	}

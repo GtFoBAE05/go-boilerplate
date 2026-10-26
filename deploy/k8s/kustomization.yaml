@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: go-boilerplate
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - service.yaml
+  - deployment.yaml
+  - pdb.yaml
+  - hpa.yaml
+  - networkpolicy.yaml
+images:
+  - name: registry.example.com/go-boilerplate
+    newTag: VERSION

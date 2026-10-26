@@ -5,12 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const pgUniqueViolation = "23505"
+
+// rollbackTimeout bounds cleanup after the request context is already canceled.
+const rollbackTimeout = 5 * time.Second
 
 // IsUniqueViolation reports whether err is a Postgres unique-constraint
 // violation. Storage-specific error inspection belongs here, not in a service:
@@ -59,8 +63,14 @@ func (s *store) ExecTx(ctx context.Context, fn func(Querier) error) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	// Rollback after a successful commit is a harmless no-op.
-	defer func() { _ = tx.Rollback(ctx) }()
+	// Rollback after a successful commit is a harmless no-op. The request
+	// context may already be canceled when a query times out; using it here
+	// would skip the rollback and leave the connection dirty.
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 
 	if err := fn(s.Queries.WithTx(tx)); err != nil {
 		return err

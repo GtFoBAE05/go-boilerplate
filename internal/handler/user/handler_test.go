@@ -71,6 +71,7 @@ func TestCreateValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
 			h.create(rec, req)
@@ -111,6 +112,7 @@ func TestCreateRejectsLongEmailBeforeService(t *testing.T) {
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 	body := `{"name":"a","email":"` + strings.Repeat("a", 395) + `@b.co"}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -140,6 +142,7 @@ func TestCreateBodyTooLarge(t *testing.T) {
 
 	huge := `{"name":"` + strings.Repeat("x", 2<<20) + `","email":"a@b.co"}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(huge))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.create(rec, req)
 
@@ -168,6 +171,7 @@ func TestCreateSuccess(t *testing.T) {
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{\"name\":\"alice\",\"email\":\"a@b.co\"}\n"))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -214,6 +218,7 @@ func TestCreateEmailTakenMapsTo409(t *testing.T) {
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"alice","email":"a@b.co"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -247,6 +252,7 @@ func TestCreateLowercasesEmailBeforeService(t *testing.T) {
 
 	body := `{"name":"alice","email":" ALICE@Example.COM "}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -270,6 +276,7 @@ func TestCreateTrimsBeforeService(t *testing.T) {
 
 	body := `{"name":"  alice  ","email":" a@b.co "}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -287,6 +294,7 @@ func TestUpdateWhitespaceOnlyNameRejected(t *testing.T) {
 	h := NewHandler(nil, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPatch, "/7", strings.NewReader(`{"name":"   "}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -306,6 +314,7 @@ func TestUpdatePartialBody(t *testing.T) {
 	h := NewHandler(svc, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPatch, "/7", strings.NewReader(`{"name":"  bob  "}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 
@@ -394,6 +403,7 @@ func TestUpdateEmptyBodyRejected(t *testing.T) {
 	h := NewHandler(nil, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPatch, "/7", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, req)
 

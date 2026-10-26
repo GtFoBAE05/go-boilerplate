@@ -7,3 +7,4 @@ coverage.*
 !.env.example
 .idea/
 .vscode/
+deploy/k8s/secret.yaml

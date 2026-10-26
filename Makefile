@@ -1,4 +1,4 @@
-.PHONY: run build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status vuln docker-up docker-down docker-build help
+.PHONY: run build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-down docker-build docker-build-migrate help
 
 # Tool versions are pinned so local runs and CI can never drift. Bump here and
 # in .github/workflows/ci.yml together; GOLANGCI_VERSION and GOSEC_VERSION must
@@ -70,6 +70,9 @@ migrate-down: ## Roll back one migration
 migrate-status: ## Show which migrations are applied
 	$(GOOSE) -dir db/migrations postgres "$(DB_DSN)" status
 
+migrate-run: ## Run the production migrator (advisory lock, POSTGRES_MIGRATION_DSN)
+	go run ./cmd/migrate
+
 docker-up: ## Start postgres, redis, jaeger, prometheus
 	docker compose up -d
 
@@ -83,5 +86,8 @@ docker-build: ## Build the production image with provenance stamped in
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t go-boilerplate:$(VERSION) -t go-boilerplate:latest .
 
+docker-build-migrate: ## Build the migration-only image
+	docker build --target migrate -t go-boilerplate-migrate:$(VERSION) .
+
 help: ## Show targets
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'

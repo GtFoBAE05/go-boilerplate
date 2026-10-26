@@ -226,3 +226,12 @@ func TestWriteJSONSetsContentTypeOnNilBody(t *testing.T) {
 		t.Fatalf("want empty body, got %q", rec.Body.String())
 	}
 }
+
+func TestSuccessResponsesDisableCaching(t *testing.T) {
+	rec := httptest.NewRecorder()
+	OK(rec, http.StatusOK, map[string]string{"ok": "yes"})
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("want Cache-Control no-store, got %q", got)
+	}
+}

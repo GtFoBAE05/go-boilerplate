@@ -1,0 +1,49 @@
+# Run this before rolling out a new image. The job uses a DDL-only role and
+# takes a Postgres advisory lock, so a retried or concurrent job serializes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: go-boilerplate-migrate
+  labels:
+    app.kubernetes.io/name: go-boilerplate
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: go-boilerplate
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: go-boilerplate
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: registry.example.com/go-boilerplate-migrate:VERSION
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: go-boilerplate
+            - secretRef:
+                name: go-boilerplate-migrate
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

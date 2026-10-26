@@ -5,8 +5,8 @@ package migrations
 
 import "embed"
 
-// FS holds every goose migration in this directory, applied by
-// internal/platform/postgres.Migrate at startup.
+// FS holds every goose migration in this directory, applied by cmd/migrate or
+// by internal/platform/postgres.Migrate at development startup.
 //
 //go:embed *.sql
 var FS embed.FS

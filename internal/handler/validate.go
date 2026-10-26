@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"reflect"
 	"strings"
@@ -33,15 +34,30 @@ func newValidator() *validator.Validate {
 // maxBodyBytes caps DecodeValid bodies; JSON API payloads are small.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
+// isJSONContentType accepts application/json and structured +json media types,
+// with optional parameters such as charset.
+func isJSONContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
 // normalizer canonicalizes before validation, keeping decode -> normalize ->
 // validate identical for every resource. Doing it after validation lets
 // whitespace-only input pass `required,min=1` and reach the database empty.
 type normalizer interface{ Normalize() }
 
 // DecodeValid decodes and validates the JSON body, writing the error response
-// (413, 400, or 422) and returning ok=false on failure.
+// (415, 413, 400, or 422) and returning ok=false on failure.
 func DecodeValid[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	var req T
+	if !isJSONContentType(r.Header.Get("Content-Type")) {
+		WriteError(w, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType,
+			"Content-Type must be application/json")
+		return req, false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

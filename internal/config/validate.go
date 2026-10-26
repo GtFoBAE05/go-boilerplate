@@ -3,10 +3,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ValidateService rejects a config the app would otherwise run with silently.
@@ -48,6 +51,15 @@ func ValidateServer(c *ServerConfig) error {
 	}
 	if c.DrainDelay < 0 {
 		errs = append(errs, fmt.Errorf("server.drain_delay must not be negative, got %s", c.DrainDelay))
+	}
+	for _, cidr := range strings.Split(c.TrustedProxyCIDRs, ",") {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			errs = append(errs, fmt.Errorf("server.trusted_proxy_cidrs contains invalid CIDR %q: %w", cidr, err))
+		}
 	}
 	// A header deadline above the whole-request deadline can never fire, which
 	// looks configured but leaves slowloris protection to the wider timeout.
@@ -99,6 +111,31 @@ func ValidatePostgres(c *PostgresConfig) error {
 		errs = append(errs, fmt.Errorf("postgres.min_conns (%d) must be <= postgres.max_conns (%d)",
 			c.MinConns, c.MaxConns))
 	}
+	for _, d := range []struct {
+		key string
+		val time.Duration
+	}{
+		{"postgres.statement_timeout", c.StatementTimeout},
+		{"postgres.lock_timeout", c.LockTimeout},
+		{"postgres.idle_in_transaction_timeout", c.IdleInTransactionTimeout},
+	} {
+		if d.val < time.Millisecond {
+			errs = append(errs, fmt.Errorf("%s must be at least 1ms, got %s", d.key, d.val))
+		}
+	}
+	if c.MaxConnLifetime < 0 {
+		errs = append(errs, fmt.Errorf("postgres.max_conn_lifetime must not be negative, got %s",
+			c.MaxConnLifetime))
+	}
+	if c.MaxConnLifetimeJitter < 0 {
+		errs = append(errs, fmt.Errorf("postgres.max_conn_lifetime_jitter must not be negative, got %s",
+			c.MaxConnLifetimeJitter))
+	}
+	if c.MaxConnLifetime > 0 && c.MaxConnLifetimeJitter > c.MaxConnLifetime {
+		errs = append(errs, fmt.Errorf(
+			"postgres.max_conn_lifetime_jitter (%s) must be <= postgres.max_conn_lifetime (%s)",
+			c.MaxConnLifetimeJitter, c.MaxConnLifetime))
+	}
 	switch c.QueryExecMode {
 	case "cache_statement", "cache_describe", "describe_exec", "exec", "simple_protocol":
 	default:
@@ -107,6 +144,36 @@ func ValidatePostgres(c *PostgresConfig) error {
 			c.QueryExecMode))
 	}
 	return errors.Join(errs...)
+}
+
+// ValidatePostgresMigration accepts either the runtime DSN or a dedicated
+// migration DSN, so a production migration job never needs the API's role.
+func ValidatePostgresMigration(c *PostgresConfig) error {
+	if strings.TrimSpace(c.DSN) == "" && strings.TrimSpace(c.MigrationDSN) == "" {
+		return errors.New("postgres.migration_dsn or postgres.dsn must be set")
+	}
+	copy := *c
+	if strings.TrimSpace(copy.DSN) == "" {
+		copy.DSN = copy.MigrationDSN
+	}
+	return ValidatePostgres(&copy)
+}
+
+// validatePostgresTLS requires certificate verification, not merely encryption.
+// sslmode=require encrypts but does not authenticate the server; prefer, allow,
+// and disable are weaker still.
+func validatePostgresTLS(dsn string) error {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	if cfg.TLSConfig == nil {
+		return errors.New("must enable TLS in production (use sslmode=verify-full)")
+	}
+	if cfg.TLSConfig.InsecureSkipVerify && cfg.TLSConfig.VerifyPeerCertificate == nil {
+		return errors.New("must verify the server certificate in production (use sslmode=verify-ca or verify-full)")
+	}
+	return nil
 }
 
 // ValidateRedis checks the dependency mode and the connection settings it

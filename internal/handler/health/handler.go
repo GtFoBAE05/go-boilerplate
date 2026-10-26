@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +20,10 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+// readinessTimeout bounds the whole probe, not each dependency, so one slow
+// dependency cannot consume the orchestrator's probe budget.
+const readinessTimeout = 2 * time.Second
+
 // Handler serves the /healthz and /readyz probes.
 type Handler struct {
 	log *slog.Logger
@@ -30,6 +35,9 @@ type Handler struct {
 	// draining makes readiness fail while the process is shutting down.
 	// Read on every probe and written once from the shutdown path, hence atomic.
 	draining atomic.Bool
+	// state remembers the last result per dependency so a prolonged outage logs
+	// once on transition, not on every probe.
+	state sync.Map
 }
 
 // NewHandler builds the probe handler; log is required to keep dependency
@@ -71,31 +79,81 @@ func (h *Handler) Readiness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(unsampled(r.Context()), 3*time.Second)
+	ctx, cancel := context.WithTimeout(unsampled(r.Context()), readinessTimeout)
 	defer cancel()
 
-	status := http.StatusOK
-	checks := make(map[string]string, len(h.required)+len(h.optional))
-
+	type result struct {
+		name     string
+		required bool
+		err      error
+	}
+	total := len(h.required) + len(h.optional)
+	results := make(chan result, total)
 	for name, dep := range h.required {
-		if err := dep.Ping(ctx); err != nil {
-			h.log.WarnContext(r.Context(), "readiness dependency failed",
-				"dependency", name, "required", true, "error", err)
-			checks[name] = "down"
-			status = http.StatusServiceUnavailable
-		} else {
-			checks[name] = "up"
-		}
+		go func(name string, dep Pinger) {
+			results <- result{name: name, required: true, err: dep.Ping(ctx)}
+		}(name, dep)
 	}
 	for name, dep := range h.optional {
-		if err := dep.Ping(ctx); err != nil {
-			h.log.WarnContext(r.Context(), "readiness dependency failed",
-				"dependency", name, "required", false, "error", err)
-			checks[name] = "degraded"
-		} else {
-			checks[name] = "up"
+		go func(name string, dep Pinger) {
+			results <- result{name: name, required: false, err: dep.Ping(ctx)}
+		}(name, dep)
+	}
+
+	status := http.StatusOK
+	checks := make(map[string]string, total)
+	record := func(res result) {
+		h.recordDependency(r.Context(), res.name, res.required, res.err)
+		switch {
+		case res.err == nil:
+			checks[res.name] = "up"
+		case res.required:
+			checks[res.name] = "down"
+			status = http.StatusServiceUnavailable
+		default:
+			checks[res.name] = "degraded"
+		}
+	}
+
+	// Do not wait for a Pinger that ignores its context: the probe budget is a
+	// hard ceiling, not a hint. The channel is buffered so late goroutines can
+	// still send and exit after this response is written.
+	pending := make(map[string]bool, total)
+	for name := range h.required {
+		pending[name] = true
+	}
+	for name := range h.optional {
+		pending[name] = false
+	}
+	for received := 0; received < total; {
+		select {
+		case res := <-results:
+			received++
+			delete(pending, res.name)
+			record(res)
+		case <-ctx.Done():
+			for name, required := range pending {
+				record(result{name: name, required: required, err: ctx.Err()})
+			}
+			received = total
 		}
 	}
 
 	handler.WriteJSON(w, status, map[string]any{"checks": checks})
+}
+
+// recordDependency logs transitions only: an outage that lasts hours must not
+// produce one warning per probe.
+func (h *Handler) recordDependency(ctx context.Context, name string, required bool, err error) {
+	down := err != nil
+	prev, loaded := h.state.Swap(name, down)
+	prevDown, _ := prev.(bool)
+	switch {
+	case down && (!loaded || !prevDown):
+		h.log.WarnContext(ctx, "readiness dependency failed",
+			"dependency", name, "required", required, "error", err)
+	case !down && loaded && prevDown:
+		h.log.InfoContext(ctx, "readiness dependency recovered",
+			"dependency", name, "required", required)
+	}
 }

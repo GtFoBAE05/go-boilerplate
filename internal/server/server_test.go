@@ -559,8 +559,8 @@ func TestPprofServerDisabledReturnsNil(t *testing.T) {
 	}
 }
 
-// Draining must fail readiness while liveness keeps reporting 200: a liveness
-// failure tells the orchestrator to kill the process mid-drain.
+// Optional Redis that was unreachable at startup must report degraded without
+// failing readiness; the app can still serve traffic without it.
 func TestReadinessReportsOptionalRedisUnavailable(t *testing.T) {
 	cfg := &config.Config{
 		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
@@ -593,6 +593,8 @@ func TestReadinessReportsOptionalRedisUnavailable(t *testing.T) {
 	}
 }
 
+// Draining must fail readiness while liveness keeps reporting 200: a liveness
+// failure tells the orchestrator to kill the process mid-drain.
 func TestBeginDrainFailsReadinessButNotLiveness(t *testing.T) {
 	srv := newTestServerWith(t)
 	h := srv.http.Handler
@@ -609,5 +611,128 @@ func TestBeginDrainFailsReadinessButNotLiveness(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/healthz while draining: want 200, got %d", rec.Code)
+	}
+}
+
+func TestTrustedProxyIgnoresHeaderFromUntrustedPeer(t *testing.T) {
+	nets, err := parseTrustedProxyCIDRs("10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("parse CIDRs: %v", err)
+	}
+	var got string
+	h := trustedProxy(nets)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got = r.RemoteAddr
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.9:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if got != "203.0.113.9:1234" {
+		t.Fatalf("untrusted peer must keep its address, got %q", got)
+	}
+}
+
+func TestTrustedProxyUsesRightmostUntrustedHop(t *testing.T) {
+	nets, err := parseTrustedProxyCIDRs("10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("parse CIDRs: %v", err)
+	}
+	for _, tt := range []struct {
+		name string
+		xff  string
+		want string
+	}{
+		{"single client", "198.51.100.7", "198.51.100.7:0"},
+		{"skips trusted hops", "198.51.100.7, 10.0.0.6", "198.51.100.7:0"},
+		{"ignores spoofed left hop", "1.1.1.1, 198.51.100.7", "198.51.100.7:0"},
+		{"malformed falls back", "garbage", "10.0.0.5:1234"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			h := trustedProxy(nets)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				got = r.RemoteAddr
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = "10.0.0.5:1234"
+			req.Header.Set("X-Forwarded-For", tt.xff)
+			h.ServeHTTP(httptest.NewRecorder(), req)
+			if got != tt.want {
+				t.Fatalf("want %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestTrustedProxyRateLimitUsesForwardedClient(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+			RequestTimeout: 20 * time.Second, TrustedProxyCIDRs: "10.0.0.0/8",
+		},
+		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
+		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Minute},
+	}
+	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}, Postgres: stubPinger{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	call := func(client string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+		req.RemoteAddr = "10.0.0.5:1234"
+		req.Header.Set("X-Forwarded-For", client)
+		rec := httptest.NewRecorder()
+		srv.http.Handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := call("198.51.100.1"); got != http.StatusOK {
+		t.Fatalf("first client: want 200, got %d", got)
+	}
+	if got := call("198.51.100.2"); got != http.StatusOK {
+		t.Fatalf("second client must have its own bucket, got %d", got)
+	}
+	if got := call("198.51.100.1"); got != http.StatusTooManyRequests {
+		t.Fatalf("first client repeat: want 429, got %d", got)
+	}
+}
+
+func TestNewRejectsInvalidTrustedProxyCIDR(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+			RequestTimeout: 20 * time.Second, TrustedProxyCIDRs: "not-a-cidr",
+		},
+		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
+		RateLimit: config.RateLimitConfig{Enabled: false},
+	}
+	if _, err := New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}, Postgres: stubPinger{}}); err == nil {
+		t.Fatal("want an invalid CIDR error")
+	}
+}
+
+func TestRequestIDIsEchoed(t *testing.T) {
+	h := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-Id", "trace-me-123")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Request-Id"); got != "trace-me-123" {
+		t.Fatalf("want echoed request id, got %q", got)
+	}
+}
+
+func TestGeneratedRequestIDIsEchoed(t *testing.T) {
+	h := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Request-Id"); got == "" {
+		t.Fatal("want generated request id in response")
 	}
 }
