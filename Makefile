@@ -1,4 +1,4 @@
-.PHONY: run build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-down docker-build docker-build-migrate help
+.PHONY: run build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-up-all observability-up observability-down docker-down docker-build docker-build-migrate help
 
 # Tool versions are pinned so local runs and CI can never drift. Bump here and
 # in .github/workflows/ci.yml together; GOLANGCI_VERSION and GOSEC_VERSION must
@@ -73,11 +73,20 @@ migrate-status: ## Show which migrations are applied
 migrate-run: ## Run the production migrator (advisory lock, POSTGRES_MIGRATION_DSN)
 	go run ./cmd/migrate
 
-docker-up: ## Start postgres, redis, jaeger, prometheus
+docker-up: ## Start postgres and redis
 	docker compose up -d
 
+docker-up-all: ## Start postgres, redis, and observability
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+
+observability-up: ## Start jaeger, prometheus, and otel-collector
+	docker compose -f docker-compose.observability.yml up -d
+
+observability-down: ## Stop only the observability stack
+	docker compose -f docker-compose.observability.yml stop
+
 docker-down: ## Stop the local stack
-	docker compose down
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml down
 
 docker-build: ## Build the production image with provenance stamped in
 	docker build \

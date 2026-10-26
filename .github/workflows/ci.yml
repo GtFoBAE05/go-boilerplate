@@ -167,6 +167,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate compose files
+        run: |
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.observability.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.observability.yml config >/dev/null
       - run: |
           docker build \
             --build-arg VERSION="${{ github.ref_name }}" \

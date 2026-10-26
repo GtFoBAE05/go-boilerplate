@@ -14,7 +14,8 @@ Prerequisites: Go 1.27.3+ and Docker Compose.
 
 ```bash
 cp .env.example .env      # local settings; no .env means production defaults (and no DSN)
-docker compose up -d      # postgres, redis, jaeger, prometheus, otel-collector
+docker compose up -d      # postgres + redis
+docker compose -f docker-compose.observability.yml up -d  # jaeger, prometheus, collector
 go run ./cmd/api          # applies migrations when POSTGRES_MIGRATE=true
 ```
 
@@ -23,6 +24,11 @@ go run ./cmd/api          # applies migrations when POSTGRES_MIGRATE=true
 | API | <http://localhost:8080> |
 | Jaeger | <http://localhost:16686> |
 | Prometheus | <http://localhost:9090> |
+
+Jaeger and Prometheus are available only after the observability compose file is
+running. `make docker-up-all` starts both compose files. If you run only the
+application dependencies, set `OTEL_SDK_DISABLED=true` or start observability to
+avoid failed OTLP exports.
 
 Postgres uses host port **5433** and Redis **6380** to avoid native installs.
 `.env.example` enables debug logs, optional Redis, and migrations on boot; the
@@ -63,7 +69,7 @@ curl -X POST localhost:8080/api/v1/users \
   cleanup after a canceled request, and an advisory-locked migration job.
 - **Guardrail CI** — SHA-pinned actions, digest-pinned images, lint, `gosec`,
   race and integration tests, `govulncheck`, sqlc drift, `promtool`, Trivy,
-  and a Docker smoke test.
+  Compose validation, and a Docker smoke test.
 
 ## Architecture
 
@@ -265,6 +271,9 @@ private-range access to Postgres, Redis, and the OTLP collector.
 
 ## Observability
 
+Start the local observability stack with
+`docker compose -f docker-compose.observability.yml up -d`.
+
 - **Traces**: Jaeger at <http://localhost:16686>; logs carry `trace_id` and
   `span_id`.
 - **Metrics**: Prometheus at <http://localhost:9090>, scraping the collector.
@@ -352,6 +361,10 @@ the connection leak; raising `POSTGRES_MAX_CONNS` only moves the wall.
 ## Development
 
 ```bash
+make docker-up          # postgres + redis
+make docker-up-all      # plus jaeger, prometheus, otel-collector
+make observability-up   # observability only
+make observability-down # stop observability only
 make test               # go test -race ./...
 make test-integration   # testcontainers suite
 make lint               # golangci-lint

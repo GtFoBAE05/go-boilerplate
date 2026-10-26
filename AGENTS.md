@@ -8,6 +8,7 @@ keep human documentation there and do not add a separate `docs/` tree.
 ```bash
 cp .env.example .env
 docker compose up -d
+docker compose -f docker-compose.observability.yml up -d
 go run ./cmd/api
 make test test-integration lint gosec sqlc sqlc-diff vuln
 make migrate-new name=foo
@@ -98,7 +99,7 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
 ## Deliberate decisions — do not “fix” these
 
 - No auth, Swagger/OpenAPI, mock generators, or CORS.
-- The app is not in `docker-compose.yml`; that file is local infrastructure.
+- The app is not in either compose file; they are local infrastructure.
 - Offset pagination is the default; switch a resource to keyset past ~10k rows.
 - Provenance comes from `-ldflags` into `internal/app/version.go`;
   `.dockerignore` excludes `.git`.
