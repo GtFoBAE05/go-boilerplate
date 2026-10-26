@@ -63,7 +63,7 @@ curl -X POST localhost:8080/api/v1/users \
   cleanup after a canceled request, and an advisory-locked migration job.
 - **Guardrail CI** — SHA-pinned actions, digest-pinned images, lint, `gosec`,
   race and integration tests, `govulncheck`, sqlc drift, `promtool`, Trivy,
-  SBOM generation/signing, and a Docker smoke test.
+  and a Docker smoke test.
 
 ## Architecture
 
