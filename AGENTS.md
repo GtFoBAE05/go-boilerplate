@@ -7,16 +7,19 @@ keep human documentation there and do not add a separate `docs/` tree.
 
 ```bash
 cp .env.example .env
-docker compose up -d
-docker compose -f docker-compose.observability.yml up -d
-go run ./cmd/api
+make docker-up-all
+make observability-rules
+make run-observability
 make test test-integration lint gosec sqlc sqlc-diff vuln
 make migrate-new name=foo
 ```
 
+`make run-observability` tees JSON stdout to `.tmp/logs/api.log`; plain
+`go run ./cmd/api` does not ship logs to Loki.
+
 Single test: `go test -run TestName ./internal/service/user/`.
 
-Promtool: `docker run --rm --entrypoint promtool -v "$PWD/deploy:/deploy:ro" prom/prometheus:v3.14.0 check rules /deploy/rules.yml`.
+Promtool (Mimir rule format): `docker run --rm --entrypoint promtool -v "$PWD/deploy:/deploy:ro" prom/prometheus:v3.14.0 check rules /deploy/rules.yml`.
 
 On Windows with 32-bit gcc, `-race` fails; let CI cover it. sqlc needs
 `CGO_ENABLED=0`, which the Makefile sets. Versions are pinned in the Makefile
@@ -79,8 +82,9 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
 - Postgres error inspection belongs in `internal/repository`
   (`IsUniqueViolation`, `ConstraintName`), not services.
 - Goose migrations are embedded and applied at boot only when
-  `POSTGRES_MIGRATE=true`; production runs `DB_DSN=... make migrate-up` from a
-  dedicated job.
+  `POSTGRES_MIGRATE=true`; production runs the advisory-locked
+  `POSTGRES_MIGRATION_DSN=... make migrate-run` (`cmd/migrate`) from a dedicated
+  job.
 
 ### Observability
 
@@ -94,7 +98,17 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   rotation. Optional Redis is only optional when the limiter is off or fell back
   to local counters at startup.
 - `telemetry.Setup` runs before `postgres.NewPool` and `redis.New`.
-- Keep `honor_labels: true` in `deploy/prometheus.yml`.
+- The local stack is LGTM: app OTLP → collector → Tempo/Mimir; app stdout JSON
+  → `.tmp/logs/api.log` → collector `file_log` → Loki. Grafana is the UI.
+- Keep `honor_labels: true` in the collector's `prometheus/self` receiver. It
+  preserves the app's `job`/`instance` labels when the collector scrapes its own
+  Prometheus exporter before remote-writing to Mimir.
+- Do not parse JSON log fields into OTLP attributes in the collector: Loki
+  promotes attributes to labels, and `trace_id`/`request_id`/`path` would create
+  unbounded streams. Keep them in the JSON body.
+- `deploy/rules.yml` is loaded into Mimir's ruler by the one-shot `mimir-rules`
+  service; `make observability-rules` reloads it. There is no local
+  Alertmanager, so rules evaluate but do not notify.
 
 ## Deliberate decisions — do not “fix” these
 
@@ -105,7 +119,9 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   `.dockerignore` excludes `.git`.
 - `logger` and observability are one package (`platform/telemetry`).
 - pprof is loopback-only, off by default, with no bind-host knob.
-- There is no `up` metric: use `AppMetricsMissing` and `CollectorDown` together.
+- The app has no `up` metric. The collector's self-scrape provides
+  `up{job="otel-collector"}`; use `AppMetricsMissing` and `CollectorDown`
+  together.
 - Shutdown: restore signals → `BeginDrain()` → `drain_delay` → `Shutdown`;
   liveness stays 200 during the drain.
 

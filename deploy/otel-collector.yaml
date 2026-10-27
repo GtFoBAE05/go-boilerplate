@@ -6,6 +6,31 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+  # The app writes structured JSON logs to stdout. `make run-observability`
+  # tees that stream into .tmp/logs/api.log; the collector tails the file and
+  # ships it to Loki. The app itself never pushes logs.
+  #
+  # The line is deliberately not parsed into attributes here: Loki promotes
+  # OTLP attributes to stream labels, and trace_id/request_id/path are unbounded
+  # values. Keeping the JSON in the body preserves those fields for `| json`
+  # queries without turning each request into a new stream.
+  file_log:
+    include: [/var/log/app/*.log]
+    start_at: beginning
+    storage: file_storage
+
+  # The collector still exposes the app's OTLP metrics as a Prometheus target.
+  # Scraping that target from inside the collector is what gives Mimir the
+  # `up` series that CollectorDown needs, without running a separate Prometheus.
+  prometheus/self:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 15s
+          honor_labels: true
+          static_configs:
+            - targets: ["127.0.0.1:8889"]
+
 processors:
   batch:
     timeout: 1s
@@ -13,17 +38,29 @@ processors:
   memory_limiter:
     check_interval: 1s
     limit_mib: 256
+  # Loki needs at least one bounded stream label. The JSON body still carries
+  # the original service field, but this resource attribute is what Grafana
+  # groups streams by. Update it when the template is renamed.
+  resource/logs:
+    attributes:
+      - key: service.name
+        value: go-boilerplate
+        action: upsert
 
 exporters:
-  otlp_grpc/jaeger:
-    endpoint: jaeger:4317
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
     tls:
       insecure: true
 
-  # The app pushes metrics here; Prometheus scrapes this endpoint. The collector
-  # is what bridges push to pull, so the app never opens a scrape port of its
-  # own.
-  #
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+
+  prometheus_remote_write/mimir:
+    endpoint: http://mimir:9009/api/v1/push
+    resource_to_telemetry_conversion:
+      enabled: false
+
   # resource_to_telemetry_conversion stays off: with it on, every resource
   # attribute (service.version, vcs.ref.head.revision, ...) is copied onto every
   # single series instead of living once in target_info. That is a label per
@@ -34,13 +71,30 @@ exporters:
     resource_to_telemetry_conversion:
       enabled: false
 
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol
+    create_directory: true
+
 service:
+  extensions: [file_storage]
   pipelines:
+    logs:
+      receivers: [file_log]
+      processors: [memory_limiter, resource/logs, batch]
+      exporters: [otlp_http/loki]
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp_grpc/jaeger]
-    metrics:
+      exporters: [otlp_grpc/tempo]
+    # App metrics are converted to Prometheus once, then scraped by the
+    # prometheus/self receiver below. This preserves the job/instance labels and
+    # target_info the app supplies, exactly as the old external Prometheus did.
+    metrics/app:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [prometheus]
+    metrics/mimir:
+      receivers: [prometheus/self]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus_remote_write/mimir]

@@ -104,9 +104,9 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(c
 		semconv.ServiceName(serviceName),
 		semconv.DeploymentEnvironmentName(env),
 	}
-	// Becomes Prometheus' instance label. Scraping derived it from the target
-	// address; pushing, only the process can say who it is, and without it
-	// every replica collapses onto one series.
+	// Becomes the metrics backend's instance label. Scraping derived it from
+	// the target address; pushing, only the process can say who it is, and
+	// without it every replica collapses onto one series.
 	if hostname, err := os.Hostname(); err == nil && hostname != "" {
 		attrs = append(attrs, semconv.ServiceInstanceID(hostname))
 	}
@@ -129,7 +129,7 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(c
 
 	var shutdowns []func(context.Context) error
 
-	// Traces: OTLP over gRPC (Jaeger, Tempo, or any OTLP collector).
+	// Traces: OTLP over gRPC (Tempo or any OTLP collector).
 	if t := o.tracing; t != nil {
 		traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpointURL(t.endpointURL))
 		if err != nil {

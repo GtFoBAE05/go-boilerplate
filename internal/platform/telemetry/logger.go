@@ -55,7 +55,7 @@ func NewLogger(level string, opts ...LogOption) *slog.Logger {
 }
 
 // traceHandler decorates a slog.Handler with trace correlation, so any log
-// line written inside a traced request can be looked up in Jaeger and
+// line written inside a traced request can be looked up in Tempo and
 // vice versa — no per-call-site plumbing.
 type traceHandler struct {
 	slog.Handler

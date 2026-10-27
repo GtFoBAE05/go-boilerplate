@@ -1,0 +1,55 @@
+# Local single-binary Mimir. Development only: filesystem storage, no
+# replication, and no tenant isolation. Production needs object storage, HA,
+# and authentication.
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  log_level: warn
+
+blocks_storage:
+  backend: filesystem
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+  filesystem:
+    dir: /data/blocks
+  tsdb:
+    dir: /data/tsdb
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: inmemory
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+
+ruler:
+  enable_api: true
+  rule_path: /data/ruler-tmp
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/ruler
+
+store_gateway:
+  sharding_ring:
+    kvstore:
+      store: inmemory
+    replication_factor: 1

@@ -1,39 +1,107 @@
-# Local observability stack, kept separate from application dependencies so it
-# can be started only when needed. Start it alone with:
+# Local LGTM stack, kept separate from application dependencies so it can be
+# started only when needed. Start it alone with:
 #
+#   mkdir -p .tmp/logs
 #   docker compose -f docker-compose.observability.yml up -d
 #
 # or together with Postgres and Redis with:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#   make docker-up-all
+#
+# `make observability-up` and `make docker-up-all` create .tmp/logs for you;
+# invoking Compose directly needs the mkdir because the bind mount is read-only.
+#
+# This is development configuration: filesystem storage, no replication, no
+# auth, and no TLS. Production needs object storage and tenant isolation.
 services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.163.2@sha256:7f22d2a6748110ffb6a59bc0df448bccbf501cdb667d610ede4c61d3863d5849
     command: ["--config=/etc/otel-collector.yaml"]
+    # The upstream image runs as a non-root user; the named volume is created
+    # root-owned, so the filelog offset store cannot be opened otherwise. This
+    # is a local-only stack.
+    user: "0:0"
     volumes:
       - ./deploy/otel-collector.yaml:/etc/otel-collector.yaml:ro
+      - ./.tmp/logs:/var/log/app:ro
+      - otelcol-data:/var/lib/otelcol
     ports:
       - "4317:4317" # OTLP gRPC (app → collector)
       - "4318:4318" # OTLP HTTP
-      - "8889:8889" # Prometheus scrape target (collector → prometheus)
     depends_on:
-      - jaeger
+      - loki
+      - tempo
+      - mimir
+    restart: unless-stopped
 
-  jaeger:
-    image: cr.jaegertracing.io/jaegertracing/jaeger:2.22.0@sha256:836b967b5abcf1f7758066aa6b348619267a2f1459f72d472840570f9bd88a17
-    command: ["--config", "/etc/jaeger.yaml"]
+  loki:
+    image: grafana/loki:3.5.0@sha256:4c431d2e6b9b38718694b31c5d56be7c80dc69c513215fde1aeb5b02cd4e2665
+    command: ["-config.file=/etc/loki.yaml"]
     volumes:
-      - ./deploy/jaeger.yaml:/etc/jaeger.yaml:ro
+      - ./deploy/loki.yaml:/etc/loki.yaml:ro
+      - loki-data:/loki
     ports:
-      - "16686:16686" # UI: http://localhost:16686
-      # 4317 not exposed to host — collector talks to jaeger internally
+      - "3100:3100" # API and Grafana datasource
+    restart: unless-stopped
 
-  prometheus:
-    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
-    ports:
-      - "9090:9090" # UI: http://localhost:9090
+  tempo:
+    image: grafana/tempo:2.8.0@sha256:3cbb1b4eae79b158d25006d88abadb1f87ef98f8a902cd54c3bdffff78ea6cda
+    command: ["-config.file=/etc/tempo.yaml"]
     volumes:
-      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./deploy/rules.yml:/etc/prometheus/rules.yml:ro
+      - ./deploy/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200" # API and Grafana datasource
+    restart: unless-stopped
+
+  mimir:
+    image: grafana/mimir:2.17.0@sha256:614146229384e3dd3367d98cbd9ddc195dffe13fdfb88d77520148f09735fa8f
+    command: ["-config.file=/etc/mimir.yaml", "-target=all"]
+    volumes:
+      - ./deploy/mimir.yaml:/etc/mimir.yaml:ro
+      - mimir-data:/data
+    ports:
+      - "9009:9009" # query API at /prometheus, remote write at /api/v1/push
+    restart: unless-stopped
+
+  # One-shot rule loader. Mimir's ruler polls its filesystem rule store, so this
+  # runs once after Mimir starts and exits. On a cold start the first attempt can
+  # race Mimir's startup; restart-on-failure makes that harmless.
+  mimir-rules:
+    image: grafana/mimirtool:2.17.0@sha256:2b77e04dd666461d47613f7a7f6ab35720744dc673c55cdbaee931b1155f3ff9
+    command:
+      - rules
+      - load
+      - --address=http://mimir:9009
+      - --id=anonymous
+      - /etc/rules.yml
+    volumes:
+      - ./deploy/rules.yml:/etc/rules.yml:ro
     depends_on:
-      - otel-collector
+      - mimir
+    restart: on-failure
+
+  grafana:
+    image: grafana/grafana:12.1.0@sha256:6ac590e7cabc2fbe8d7b8fc1ce9c9f0582177b334e0df9c927ebd9670469440f
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000" # UI: http://localhost:3000
+    depends_on:
+      - loki
+      - tempo
+      - mimir
+    restart: unless-stopped
+
+volumes:
+  otelcol-data:
+  loki-data:
+  tempo-data:
+  mimir-data:
+  grafana-data:

@@ -1,4 +1,4 @@
-.PHONY: run build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-up-all observability-up observability-down docker-down docker-build docker-build-migrate help
+.PHONY: run run-observability build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-up-all observability-up observability-down observability-rules docker-down docker-build docker-build-migrate help
 
 # Tool versions are pinned so local runs and CI can never drift. Bump here and
 # in .github/workflows/ci.yml together; GOLANGCI_VERSION and GOSEC_VERSION must
@@ -30,6 +30,10 @@ LDFLAGS := -s -w \
 
 run: ## Run the API locally
 	go run ./cmd/api
+
+run-observability: ## Run the API with JSON logs teed to .tmp/logs/api.log
+	mkdir -p .tmp/logs
+	LOG_FORMAT=json go run ./cmd/api | tee -a .tmp/logs/api.log
 
 build: ## Build the API binary into ./bin
 	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/api ./cmd/api
@@ -76,14 +80,19 @@ migrate-run: ## Run the production migrator (advisory lock, POSTGRES_MIGRATION_D
 docker-up: ## Start postgres and redis
 	docker compose up -d
 
-docker-up-all: ## Start postgres, redis, and observability
+docker-up-all: ## Start postgres, redis, and the LGTM stack
+	mkdir -p .tmp/logs
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 
-observability-up: ## Start jaeger, prometheus, and otel-collector
+observability-up: ## Start Loki, Tempo, Mimir, Grafana, and otel-collector
+	mkdir -p .tmp/logs
 	docker compose -f docker-compose.observability.yml up -d
 
 observability-down: ## Stop only the observability stack
 	docker compose -f docker-compose.observability.yml stop
+
+observability-rules: ## Reload deploy/rules.yml into the local Mimir ruler
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml run --rm mimir-rules
 
 docker-down: ## Stop the local stack
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml down
