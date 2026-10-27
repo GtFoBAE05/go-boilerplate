@@ -13,22 +13,27 @@ Go 1.27 · chi · pgx/sqlc · goose · Redis · OpenTelemetry · `log/slog`
 Prerequisites: Go 1.27.3+ and Docker Compose.
 
 ```bash
-cp .env.example .env      # local settings; no .env means production defaults (and no DSN)
-docker compose up -d      # postgres + redis
-docker compose -f docker-compose.observability.yml up -d  # jaeger, prometheus, collector
-go run ./cmd/api          # applies migrations when POSTGRES_MIGRATE=true
+cp .env.example .env       # local settings; no .env means production defaults (and no DSN)
+make docker-up-all         # postgres + redis + Loki/Tempo/Mimir/Grafana/collector
+make run-observability     # API with JSON logs teed to .tmp/logs/api.log
 ```
 
 | Service | URL |
 | --- | --- |
 | API | <http://localhost:8080> |
-| Jaeger | <http://localhost:16686> |
-| Prometheus | <http://localhost:9090> |
+| Grafana UI | <http://localhost:3000> |
+| Loki API | <http://localhost:3100> |
+| Tempo API | <http://localhost:3200> |
+| Mimir API | <http://localhost:9009/prometheus> |
 
-Jaeger and Prometheus are available only after the observability compose file is
-running. `make docker-up-all` starts both compose files. If you run only the
-application dependencies, set `OTEL_SDK_DISABLED=true` or start observability to
-avoid failed OTLP exports.
+Grafana is the entry point: its datasources are provisioned automatically. The
+API applies migrations when `POSTGRES_MIGRATE=true`. `make docker-up-all` starts
+both compose files; `make observability-up` starts only the observability stack.
+
+Logs reach Loki only through `make run-observability`, which tees stdout into
+`.tmp/logs/api.log`; the collector tails that file. `make run` and a plain
+`go run ./cmd/api` leave logs in the terminal. If you run without the
+observability stack, set `OTEL_SDK_DISABLED=true` to avoid failed OTLP exports.
 
 Postgres uses host port **5433** and Redis **6380** to avoid native installs.
 `.env.example` enables debug logs, optional Redis, and migrations on boot; the
@@ -47,10 +52,11 @@ curl -X POST localhost:8080/api/v1/users \
 1. Rename the module with `go mod edit -module github.com/you/your-service`, then
    replace the old import path across the repository.
 2. Update `.golangci.yml` (`module-path`, `local-prefixes`), the three `-ldflags`
-   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, image names in
-   `deploy/k8s/`, the `job` label in `deploy/rules.yml`, and the CI
-   badge/repository URLs. `TestAlertRulesUseServiceName` fails if the rule label
-   and `SERVICE_NAME` drift apart.
+   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, the `resource/logs`
+   `service.name` in `deploy/otel-collector.yaml`, image names in `deploy/k8s/`,
+   the `job` label in `deploy/rules.yml`, and the CI badge/repository URLs.
+   `TestAlertRulesUseServiceName` fails if the rule label and `SERVICE_NAME`
+   drift apart.
 3. Keep the `user` vertical as the reference, or delete it once your first real
    resource is in place.
 
@@ -61,8 +67,8 @@ curl -X POST localhost:8080/api/v1/users \
   a deploy job.
 - **Redis rate limiting** — `REDIS_MODE=disabled|optional|required`; production
   uses a shared counter.
-- **Observability** — OpenTelemetry traces and metrics over OTLP, plus
-  trace-correlated `slog` logs.
+- **Observability** — OpenTelemetry traces and metrics over OTLP, trace-correlated
+  `slog` logs, and a local LGTM stack (Loki, Grafana, Tempo, Mimir).
 - **Hardened HTTP** — strict JSON and content type, 1 MiB body cap, deadlines,
   trusted-proxy-aware per-IP limits, and one response envelope.
 - **Safe data access** — server-side statement/lock/idle timeouts, rollback
@@ -98,7 +104,7 @@ internal/service/     use-case services (user is the example)
 internal/handler/     HTTP plumbing + resource handlers
 internal/server/      router, middleware, http.Server, pprof
 db/                   migrations and sqlc queries
-deploy/               collector, Jaeger, Prometheus, alert rules, k8s base
+deploy/               collector, Loki, Tempo, Mimir, Grafana, alert rules, k8s base
 ```
 
 `internal/platform/` may not import application code; `depguard` enforces it.
@@ -271,20 +277,39 @@ private-range access to Postgres, Redis, and the OTLP collector.
 
 ## Observability
 
-Start the local observability stack with
-`docker compose -f docker-compose.observability.yml up -d`.
+Start the local LGTM stack with `make observability-up`, then run the API with
+`make run-observability` so stdout JSON is teed to `.tmp/logs/api.log`. The
+target creates `.tmp/logs` before Compose mounts it; if you invoke Compose
+directly, run `mkdir -p .tmp/logs` first.
 
-- **Traces**: Jaeger at <http://localhost:16686>; logs carry `trace_id` and
-  `span_id`.
-- **Metrics**: Prometheus at <http://localhost:9090>, scraping the collector.
-  The app pushes over OTLP and serves no `/metrics`.
+- **Grafana**: <http://localhost:3000>. The Mimir, Loki, and Tempo datasources
+  are provisioned; Grafana runs as anonymous admin locally.
+- **Logs**: app stdout JSON → `.tmp/logs/api.log` → collector `file_log` →
+  Loki. The app never pushes logs. Only bounded values become Loki labels;
+  `trace_id`, `request_id`, and `path` stay in the JSON body, so query with
+  `| json`. Grafana's derived field turns `trace_id` into a Tempo link.
+- **Traces**: app OTLP → collector → Tempo. Paste a `trace_id` into Grafana
+  Explore (Tempo) or open it from a Loki log line.
+- **Metrics**: app OTLP → collector's Prometheus exporter → collector
+  `prometheus/self` scrape → Mimir remote write. Grafana queries Mimir. The app
+  serves no `/metrics`.
+- **Alert rules**: the one-shot `mimir-rules` service loads `deploy/rules.yml`
+  into Mimir's ruler with `mimirtool`. Reload after edits with
+  `make observability-rules`. There is no Alertmanager locally, so rules
+  evaluate but do not notify.
 - **Profiling**: pprof on a private loopback listener, off by default. Enable it
   with `PPROF_ENABLED=true`, then run
   `go tool pprof http://localhost:6060/debug/pprof/profile`.
 
-Push metrics have no `up` signal: a dead app and a dead collector look the same.
-`deploy/rules.yml` uses `AppMetricsMissing` and `CollectorDown` together. Alert
-links below are the runbook sections in this README.
+These compose files are local development configuration: filesystem storage, no
+auth, no TLS, and no replication. Production needs object storage, tenant
+isolation, and a real retention policy.
+
+The app is push-only, so it has no `up` series of its own. The collector scrapes
+its own Prometheus exporter, which produces `up{job="otel-collector"}`; both a
+failed scrape and a missing series are failure signals. `AppMetricsMissing` and
+`CollectorDown` together distinguish an app problem from a pipeline problem.
+Alert links below are the runbook sections in this README.
 
 SLO: 99.9% of API requests succeed (non-5xx) over 30 days, and p99 latency stays
 below 1s. Error-budget burn is evaluated over multiple windows: 14.4x over 5m and
@@ -303,28 +328,34 @@ Never label with a user id, email, or `trace_id`.
 
 ## Runbook
 
-Metrics are pushed, not scraped, so the absence of data is ambiguous. Check
+App metrics are pushed, not scraped, so the absence of data is ambiguous. The
+collector is the only scrape target, and it scrapes itself. Check
 `CollectorDown` and `AppMetricsMissing` together first; if both fire, the
 pipeline is broken and every other metric alert is blind rather than healthy.
 Request log lines carry `trace_id` and `span_id`; paste the `trace_id` into
-Jaeger. `target_info{service_version}` identifies the build behind a series, so
-a regression that starts at a version boundary is a rollback.
+Grafana Explore (Tempo). `target_info{service_version}` identifies the build
+behind a series, so a regression that starts at a version boundary is a
+rollback.
 
 ### AppMetricsMissing
 
 No `go_goroutine_count` series for three minutes. The app, the collector, or the
 network between them is down. If `CollectorDown` also fires, restart the
-collector and verify Prometheus can scrape its exporter port. If only this alert
+collector and verify the `prometheus` exporter on port 8889 plus the
+`prometheus/self` scrape in `deploy/otel-collector.yaml`. If only this alert
 fires, check the app's liveness probe and recent logs; Kubernetes should restart
 a wedged process. If both sides look healthy, inspect egress to
-`OTEL_EXPORTER_OTLP_ENDPOINT`.
+`OTEL_EXPORTER_OTLP_ENDPOINT` and the collector's Mimir remote-write logs.
 
 ### CollectorDown
 
-Prometheus cannot scrape the collector (`up{job="otel-collector"} == 0`).
-Restart it and verify `/metrics` on its exporter port. If it is up but not
-scrapeable, check `deploy/prometheus.yml` and `honor_labels: true`. Treat other
-metric alerts' silence as unknown, not healthy, until this clears.
+The collector's self-scrape is missing or failing
+(`absent(up{job="otel-collector"})` or `up{job="otel-collector"} == 0`), or its
+remote write to Mimir is broken. Restart it and verify the `prometheus` exporter
+on port 8889, the `prometheus/self` receiver, and the Mimir remote-write logs.
+Keep `honor_labels: true` in `deploy/otel-collector.yaml` or the app's
+`job`/`instance` labels are overwritten with the collector's identity. Treat
+other metric alerts' silence as unknown, not healthy, until this clears.
 
 ### ErrorBudgetBurnFast
 
@@ -362,9 +393,11 @@ the connection leak; raising `POSTGRES_MAX_CONNS` only moves the wall.
 
 ```bash
 make docker-up          # postgres + redis
-make docker-up-all      # plus jaeger, prometheus, otel-collector
+make docker-up-all      # plus Loki, Tempo, Mimir, Grafana, otel-collector
 make observability-up   # observability only
 make observability-down # stop observability only
+make observability-rules # reload deploy/rules.yml into Mimir
+make run-observability  # API with JSON logs teed to .tmp/logs/api.log
 make test               # go test -race ./...
 make test-integration   # testcontainers suite
 make lint               # golangci-lint

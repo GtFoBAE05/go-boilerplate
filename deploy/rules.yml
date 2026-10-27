@@ -1,16 +1,18 @@
 # Recording and alerting rules for the metrics this app pushes over OTLP.
 #
-# The app exposes no /metrics: it pushes to the collector, and Prometheus
-# scrapes the collector. Series names below are the OTLP instrument names after
-# the collector's Prometheus translation (dots to underscores, unit suffix,
-# _total on monotonic counters) — the instrument names were verified against a
-# live export, the translation follows the OTLP-to-Prometheus spec.
+# The app exposes no /metrics: it pushes to the collector, which converts the
+# metrics to a Prometheus target, scrapes that target from inside the collector,
+# and remote-writes the result to Mimir. Mimir's ruler evaluates these rules.
+# Series names below are the OTLP instrument names after the collector's
+# Prometheus translation (dots to underscores, unit suffix, _total on monotonic
+# counters) — the instrument names were verified against a live export, the
+# translation follows the OTLP-to-Prometheus spec.
 #
 # Two labels are load-bearing and come from the app's resource attributes, not
 # from the scrape: job (service.name) and instance (service.instance.id, set to
-# the hostname). prometheus.yml must keep honor_labels: true or Prometheus
-# overwrites both with the collector's own identity and every replica merges
-# into one series.
+# the hostname). The collector's prometheus/self receiver must keep
+# honor_labels: true or it overwrites both with the collector's own identity and
+# every replica merges into one series.
 #
 # Recording rules exist so a dashboard panel and an alert evaluate the same
 # expression: a threshold that disagrees with the graph it is drawn on is how an
@@ -62,10 +64,10 @@ groups:
 
   - name: app-alerts
     rules:
-      # Push has no `up`: nothing polls the app, so no scrape can fail. The
-      # closest signal is the disappearance of a series that always exists
-      # while the process runs — goroutine count is reported every export
-      # interval regardless of traffic.
+      # The app is push-only: nothing scrapes the process itself, so no scrape
+      # can fail for it. The closest signal is the disappearance of a series
+      # that always exists while the process runs — goroutine count is reported
+      # every export interval regardless of traffic.
       #
       # This is strictly weaker than a scrape failure and the alert says so:
       # a dead app, a dead collector, and a broken network between them all
@@ -88,17 +90,18 @@ groups:
           description: "The app, the collector, or the path between them is broken. Check CollectorDown first — if it is also firing, this is the collector, not the app."
           runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#appmetricsmissing"
 
-      # The collector is the only real scrape target left, so this is the one
-      # alert that still rests on `up`. It fires for a pipeline outage, during
-      # which every other rule here goes blind rather than false.
+      # The collector scrapes its own Prometheus exporter to produce this `up`
+      # series. If the collector dies, the series stops arriving, so absence is
+      # the failure signal as well as a failed scrape. A broken remote-write
+      # path to Mimir produces the same absence.
       - alert: CollectorDown
-        expr: up{job="otel-collector"} == 0
+        expr: absent(up{job="otel-collector"}) or (up{job="otel-collector"} == 0)
         for: 2m
         labels:
           severity: page
         annotations:
-          summary: "OTLP collector is not scrapeable"
-          description: "All metrics stop at once while this is firing; treat other alerts' silence as unknown, not healthy."
+          summary: "OTLP collector metrics are missing"
+          description: "The collector is down, its self-scrape is failing, or its remote write to Mimir is broken. Treat other metric alerts' silence as unknown, not healthy."
           runbook_url: "https://github.com/GtFoBAE05/go-boilerplate/blob/main/README.md#collectordown"
 
       # Multi-window burn rate for a 99.9% availability SLO. 14.4x consumes
