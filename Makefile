@@ -1,4 +1,4 @@
-.PHONY: run run-observability build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-up-all observability-up observability-down observability-rules docker-down docker-build docker-build-migrate help
+.PHONY: run run-observability build test test-integration lint gosec tidy sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status migrate-run vuln docker-up docker-up-all observability-up observability-down observability-wait observability-rules docker-down docker-build docker-build-migrate help
 
 # Tool versions are pinned so local runs and CI can never drift. Bump here and
 # in .github/workflows/ci.yml together; GOLANGCI_VERSION and GOSEC_VERSION must
@@ -83,13 +83,18 @@ docker-up: ## Start postgres and redis
 docker-up-all: ## Start postgres, redis, and the LGTM stack
 	mkdir -p .tmp/logs
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+	$(MAKE) observability-wait
 
 observability-up: ## Start Loki, Tempo, Mimir, Grafana, and otel-collector
 	mkdir -p .tmp/logs
 	docker compose -f docker-compose.observability.yml up -d
+	$(MAKE) observability-wait
 
 observability-down: ## Stop only the observability stack
 	docker compose -f docker-compose.observability.yml stop
+
+observability-wait: ## Wait until the local LGTM endpoints are ready
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml run --rm wait-for
 
 observability-rules: ## Reload deploy/rules.yml into the local Mimir ruler
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml run --rm mimir-rules

@@ -21,6 +21,11 @@ services:
     # root-owned, so the filelog offset store cannot be opened otherwise. This
     # is a local-only stack.
     user: "0:0"
+    environment:
+      # Compose reads this from .env; the collector uses it as the Loki
+      # service.name resource attribute. The default keeps the stack usable
+      # without a .env file.
+      SERVICE_NAME: ${SERVICE_NAME:-go-boilerplate}
     volumes:
       - ./deploy/otel-collector.yaml:/etc/otel-collector.yaml:ro
       - ./.tmp/logs:/var/log/app:ro
@@ -29,9 +34,12 @@ services:
       - "4317:4317" # OTLP gRPC (app → collector)
       - "4318:4318" # OTLP HTTP
     depends_on:
-      - loki
-      - tempo
-      - mimir
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      mimir:
+        condition: service_started
     restart: unless-stopped
 
   loki:
@@ -42,6 +50,12 @@ services:
       - loki-data:/loki
     ports:
       - "3100:3100" # API and Grafana datasource
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   tempo:
@@ -52,6 +66,12 @@ services:
       - tempo-data:/var/tempo
     ports:
       - "3200:3200" # API and Grafana datasource
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3200/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   mimir:
@@ -64,9 +84,8 @@ services:
       - "9009:9009" # query API at /prometheus, remote write at /api/v1/push
     restart: unless-stopped
 
-  # One-shot rule loader. Mimir's ruler polls its filesystem rule store, so this
-  # runs once after Mimir starts and exits. On a cold start the first attempt can
-  # race Mimir's startup; restart-on-failure makes that harmless.
+  # One-shot rule loader. It waits for wait-for, so a cold start cannot race
+  # Mimir's startup. Restart-on-failure still covers a transient rule load error.
   mimir-rules:
     image: grafana/mimirtool:2.17.0@sha256:2b77e04dd666461d47613f7a7f6ab35720744dc673c55cdbaee931b1155f3ff9
     command:
@@ -78,7 +97,8 @@ services:
     volumes:
       - ./deploy/rules.yml:/etc/rules.yml:ro
     depends_on:
-      - mimir
+      wait-for:
+        condition: service_completed_successfully
     restart: on-failure
 
   grafana:
@@ -94,10 +114,60 @@ services:
     ports:
       - "3000:3000" # UI: http://localhost:3000
     depends_on:
-      - loki
-      - tempo
-      - mimir
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      mimir:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/usr/bin/wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
+
+  # Mimir and the collector images are distroless, so they cannot run an
+  # in-container wget/curl probe. This one-shot service is the readiness gate:
+  # it checks every HTTP endpoint and only exits 0 once all are ready.
+  wait-for:
+    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        deadline=$$(($$(date +%s) + 120))
+        for target in \
+          "loki http://loki:3100/ready" \
+          "tempo http://tempo:3200/ready" \
+          "mimir http://mimir:9009/ready" \
+          "grafana http://grafana:3000/api/health" \
+          "otel-collector http://otel-collector:13133/"; do
+          name=$${target%% *}
+          url=$${target#* }
+          until wget -q -O /dev/null "$$url"; do
+            if [ "$$(date +%s)" -ge "$$deadline" ]; then
+              echo "$$name is not ready: $$url" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "$$name is ready"
+        done
+    depends_on:
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      mimir:
+        condition: service_started
+      grafana:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: "no"
 
 volumes:
   otelcol-data:
