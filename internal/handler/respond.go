@@ -30,10 +30,6 @@ const (
 	CodeMethodNotAllowed     = "METHOD_NOT_ALLOWED"
 	CodePayloadTooLarge      = "PAYLOAD_TOO_LARGE"
 	CodeUnsupportedMediaType = "UNSUPPORTED_MEDIA_TYPE"
-	CodeRateLimited          = "RATE_LIMITED"
-	// CodeRateLimitUnavailable indicates the shared Redis limiter could not
-	// check a request, so the request was refused rather than let through.
-	CodeRateLimitUnavailable = "RATE_LIMIT_UNAVAILABLE"
 	CodeTimeout              = "TIMEOUT"
 	CodeInternal             = "INTERNAL"
 )

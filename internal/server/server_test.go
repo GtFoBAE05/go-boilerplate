@@ -31,7 +31,7 @@ import (
 )
 
 // stubUserService lets the router build without a real service; List returns
-// empty so allowed requests succeed and we can observe the 429 on overflow.
+// empty so API requests can exercise the router without a database.
 type stubUserService struct{ usersvc.UserService }
 
 func (stubUserService) List(context.Context, usersvc.ListInput) ([]usersvc.ListOutput, error) {
@@ -42,8 +42,7 @@ type stubPinger struct{}
 
 func (stubPinger) Ping(context.Context) error { return nil }
 
-// newTestServer builds the real router allowing 1 request per window, so the
-// second request is throttled.
+// newTestServer builds the real router with no external dependencies.
 func newTestServer(t *testing.T) http.Handler {
 	t.Helper()
 	return newTestServerWith(t).http.Handler
@@ -57,8 +56,7 @@ func newTestServerWith(t *testing.T) *Server {
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			RequestTimeout: 20 * time.Second,
 		},
-		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
-		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
+		Redis: config.RedisConfig{Mode: config.RedisModeDisabled},
 	}
 	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}, Postgres: stubPinger{}})
 	if err != nil {
@@ -84,31 +82,10 @@ func TestHTTPServerHeaderLimits(t *testing.T) {
 	}
 }
 
-// Without a Redis client the limiter stays in-process. That is the development
-// mode, not a fallback: a silent per-replica budget in production is the bug
-// the shared counter exists to fix.
-func TestRateLimitOptionsWithoutRedis(t *testing.T) {
-	if got := rateLimitOptions(nil, "test:api", slog.New(slog.DiscardHandler)); got != nil {
-		t.Fatalf("want no shared counter options, got %d", len(got))
-	}
-}
-
-// With a client, both the counter and the fail-closed handler are wired in.
-func TestRateLimitOptionsWithRedis(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:0"})
-	defer func() { _ = client.Close() }()
-
-	got := rateLimitOptions(client, "test:api", slog.New(slog.DiscardHandler))
-	if len(got) != 2 {
-		t.Fatalf("want counter + error handler, got %d options", len(got))
-	}
-}
-
 func TestNewRejectsMissingOrTypedNilDependencies(t *testing.T) {
 	cfg := &config.Config{
-		Server:    config.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
-		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
-		RateLimit: config.RateLimitConfig{Enabled: false},
+		Server: config.ServerConfig{Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
+		Redis:  config.RedisConfig{Mode: config.RedisModeDisabled},
 	}
 	log := slog.New(slog.DiscardHandler)
 
@@ -247,19 +224,17 @@ func unreachableRedis(t *testing.T) *goredis.Client {
 	return client
 }
 
-// If the rate limiter uses Redis, a Redis outage must fail readiness too. The
-// limiter fails closed, so a 200/degraded probe would keep a replica that
-// answers every API request with 503 in rotation.
-func TestReadinessRequiresRedisWhenRateLimiterUsesIt(t *testing.T) {
+// A required Redis must fail readiness when it is down.
+func TestReadinessRequiresConfiguredRedis(t *testing.T) {
 	cfg := &config.Config{
-		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
-		Redis:     config.RedisConfig{Mode: config.RedisModeOptional},
-		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Second},
+		Server: config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
+		Redis:  config.RedisConfig{Mode: config.RedisModeRequired},
 	}
 	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{
-		Users:    stubUserService{},
-		Postgres: stubPinger{},
-		Redis:    unreachableRedis(t),
+		Users:         stubUserService{},
+		Postgres:      stubPinger{},
+		Redis:         unreachableRedis(t),
+		RedisRequired: true,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -269,7 +244,7 @@ func TestReadinessRequiresRedisWhenRateLimiterUsesIt(t *testing.T) {
 	srv.http.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("want 503 when the limiter's Redis is down, got %d (body: %s)", rec.Code, rec.Body.String())
+		t.Fatalf("want 503 when required Redis is down, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	var body struct {
 		Checks map[string]string `json:"checks"`
@@ -282,13 +257,12 @@ func TestReadinessRequiresRedisWhenRateLimiterUsesIt(t *testing.T) {
 	}
 }
 
-// Without the limiter, Redis is genuinely optional: a down client is reported
-// as degraded, but the process can still serve traffic.
-func TestReadinessAllowsOptionalRedisWhenLimiterDoesNotUseIt(t *testing.T) {
+// Optional Redis is genuinely optional: a down client is reported as degraded,
+// but the process can still serve traffic.
+func TestReadinessAllowsOptionalRedis(t *testing.T) {
 	cfg := &config.Config{
-		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
-		Redis:     config.RedisConfig{Mode: config.RedisModeOptional},
-		RateLimit: config.RateLimitConfig{Enabled: false},
+		Server: config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
+		Redis:  config.RedisConfig{Mode: config.RedisModeOptional},
 	}
 	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{
 		Users:    stubUserService{},
@@ -303,7 +277,7 @@ func TestReadinessAllowsOptionalRedisWhenLimiterDoesNotUseIt(t *testing.T) {
 	srv.http.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200 for optional Redis without the limiter, got %d (body: %s)", rec.Code, rec.Body.String())
+		t.Fatalf("want 200 for optional Redis, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	var body struct {
 		Checks map[string]string `json:"checks"`
@@ -357,64 +331,6 @@ func TestSanitizeRequestID(t *testing.T) {
 				t.Fatalf("invalid request id %q was adopted", tt.header)
 			}
 		})
-	}
-}
-
-func TestRateLimitEnvelope(t *testing.T) {
-	h := newTestServer(t)
-
-	do := func() *httptest.ResponseRecorder {
-		// Same RemoteAddr each call so httprate keys them to one client.
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
-		req.RemoteAddr = "203.0.113.5:1234"
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		return rec
-	}
-
-	if rec := do(); rec.Code != http.StatusOK {
-		t.Fatalf("first request: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
-	}
-
-	rec := do()
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("second request: want 429, got %d (body: %s)", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("429 response is not JSON: %v", err)
-	}
-	if resp.Error.Code != "RATE_LIMITED" {
-		t.Fatalf("want code RATE_LIMITED, got %q", resp.Error.Code)
-	}
-	if resp.Error.Message == "" {
-		t.Fatalf("want non-empty message")
-	}
-	if got := rec.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("want Retry-After 1, got %q", got)
-	}
-}
-
-// Probes live outside /api/v1 and must never be rate-limited, even under a
-// limit that would throttle the API.
-func TestProbesNotRateLimited(t *testing.T) {
-	h := newTestServer(t)
-
-	for _, path := range []string{"/healthz", "/readyz"} {
-		for i := 0; i < 5; i++ {
-			req := httptest.NewRequest(http.MethodGet, path, nil)
-			req.RemoteAddr = "203.0.113.5:1234"
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-			if rec.Code == http.StatusTooManyRequests {
-				t.Fatalf("%s was rate-limited on call %d", path, i+1)
-			}
-		}
 	}
 }
 
@@ -563,9 +479,8 @@ func TestPprofServerDisabledReturnsNil(t *testing.T) {
 // failing readiness; the app can still serve traffic without it.
 func TestReadinessReportsOptionalRedisUnavailable(t *testing.T) {
 	cfg := &config.Config{
-		Server:    config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
-		Redis:     config.RedisConfig{Mode: config.RedisModeOptional},
-		RateLimit: config.RateLimitConfig{Enabled: false},
+		Server: config.ServerConfig{Port: 8080, RequestTimeout: 20 * time.Second},
+		Redis:  config.RedisConfig{Mode: config.RedisModeOptional},
 	}
 	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{
 		Users:            stubUserService{},
@@ -664,41 +579,6 @@ func TestTrustedProxyUsesRightmostUntrustedHop(t *testing.T) {
 	}
 }
 
-func TestTrustedProxyRateLimitUsesForwardedClient(t *testing.T) {
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			Port: 8080, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second,
-			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
-			RequestTimeout: 20 * time.Second, TrustedProxyCIDRs: "10.0.0.0/8",
-		},
-		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
-		RateLimit: config.RateLimitConfig{Enabled: true, Requests: 1, Window: time.Minute},
-	}
-	srv, err := New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}, Postgres: stubPinger{}})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	call := func(client string) int {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
-		req.RemoteAddr = "10.0.0.5:1234"
-		req.Header.Set("X-Forwarded-For", client)
-		rec := httptest.NewRecorder()
-		srv.http.Handler.ServeHTTP(rec, req)
-		return rec.Code
-	}
-
-	if got := call("198.51.100.1"); got != http.StatusOK {
-		t.Fatalf("first client: want 200, got %d", got)
-	}
-	if got := call("198.51.100.2"); got != http.StatusOK {
-		t.Fatalf("second client must have its own bucket, got %d", got)
-	}
-	if got := call("198.51.100.1"); got != http.StatusTooManyRequests {
-		t.Fatalf("first client repeat: want 429, got %d", got)
-	}
-}
-
 func TestNewRejectsInvalidTrustedProxyCIDR(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -706,8 +586,7 @@ func TestNewRejectsInvalidTrustedProxyCIDR(t *testing.T) {
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			RequestTimeout: 20 * time.Second, TrustedProxyCIDRs: "not-a-cidr",
 		},
-		Redis:     config.RedisConfig{Mode: config.RedisModeDisabled},
-		RateLimit: config.RateLimitConfig{Enabled: false},
+		Redis: config.RedisConfig{Mode: config.RedisModeDisabled},
 	}
 	if _, err := New(cfg, slog.New(slog.DiscardHandler), Deps{Users: stubUserService{}, Postgres: stubPinger{}}); err == nil {
 		t.Fatal("want an invalid CIDR error")

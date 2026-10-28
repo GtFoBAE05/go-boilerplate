@@ -304,19 +304,3 @@ func ValidateLog(c *LogConfig) error {
 	}
 	return errors.Join(errs...)
 }
-
-// ValidateRateLimit checks the policy when limiting is on; disabled accepts
-// whatever is left in the fields.
-func ValidateRateLimit(c *RateLimitConfig) error {
-	if !c.Enabled {
-		return nil
-	}
-	var errs []error
-	if c.Requests <= 0 {
-		errs = append(errs, fmt.Errorf("ratelimit.requests must be > 0 when ratelimit.enabled, got %d", c.Requests))
-	}
-	if c.Window <= 0 {
-		errs = append(errs, fmt.Errorf("ratelimit.window must be > 0 when ratelimit.enabled, got %s", c.Window))
-	}
-	return errors.Join(errs...)
-}

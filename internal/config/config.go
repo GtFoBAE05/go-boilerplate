@@ -16,14 +16,13 @@ import (
 
 // Config is the root of all application settings, one field per subsystem.
 type Config struct {
-	Service   ServiceConfig   `mapstructure:"service"`
-	Server    ServerConfig    `mapstructure:"server"`
-	Pprof     PprofConfig     `mapstructure:"pprof"`
-	Postgres  PostgresConfig  `mapstructure:"postgres"`
-	Redis     RedisConfig     `mapstructure:"redis"`
-	OTel      OTelConfig      `mapstructure:"otel"`
-	Log       LogConfig       `mapstructure:"log"`
-	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
+	Service  ServiceConfig  `mapstructure:"service"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Pprof    PprofConfig    `mapstructure:"pprof"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
+	Redis    RedisConfig    `mapstructure:"redis"`
+	OTel     OTelConfig     `mapstructure:"otel"`
+	Log      LogConfig      `mapstructure:"log"`
 }
 
 // DotEnvFile is the optional local overrides file, loaded from the working
@@ -44,8 +43,8 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// LoadMigrate loads only the settings cmd/migrate needs. The API's Redis,
-// telemetry, and rate-limit settings must not block a migration job.
+// LoadMigrate loads only the settings cmd/migrate needs. The API's Redis and
+// telemetry settings must not block a migration job.
 func LoadMigrate() (*Config, error) {
 	cfg, err := load()
 	if err != nil {
@@ -97,25 +96,12 @@ func (c *Config) validate() error {
 		ValidateRedis(&c.Redis),
 		ValidateOTel(&c.OTel),
 		ValidateLog(&c.Log),
-		ValidateRateLimit(&c.RateLimit),
 	}
 
 	// Two listeners on the same port would make one of them fail at bind time
 	// with a much less obvious message, and only when pprof is turned on.
 	if c.Pprof.Enabled && c.Pprof.Port == c.Server.Port {
 		errs = append(errs, fmt.Errorf("pprof.port (%d) must differ from server.port", c.Pprof.Port))
-	}
-	// Only the limiter is correctness-critical: a shared counter is what makes
-	// the cap global. A local limiter may not quietly multiply by the replica
-	// count.
-	if c.Service.Env == EnvProduction &&
-		c.RateLimit.Enabled &&
-		!c.RateLimit.AllowProcessLocal &&
-		c.Redis.Mode != RedisModeRequired {
-		errs = append(errs, fmt.Errorf(
-			"production with rate limiting requires redis.mode=required (got %q): "+
-				"set REDIS_MODE=required, or RATELIMIT_ALLOW_PROCESS_LOCAL=true to accept one budget per replica",
-			c.Redis.Mode))
 	}
 	// Migrations from every replica at once are a race, not a rollout. CI or a
 	// dedicated job owns them in production; the boot-time switch is a local
@@ -196,7 +182,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("postgres.migrate", false)
 	v.SetDefault("postgres.query_exec_mode", "cache_statement")
 
-	v.SetDefault("redis.mode", string(RedisModeRequired))
+	v.SetDefault("redis.mode", string(RedisModeOptional))
 	v.SetDefault("redis.addr", "localhost:6380")
 	v.SetDefault("redis.password", "")
 	v.SetDefault("redis.db", 0)
@@ -224,9 +210,4 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
-
-	v.SetDefault("ratelimit.enabled", true)
-	v.SetDefault("ratelimit.requests", 40)
-	v.SetDefault("ratelimit.window", "1s")
-	v.SetDefault("ratelimit.allow_process_local", false)
 }

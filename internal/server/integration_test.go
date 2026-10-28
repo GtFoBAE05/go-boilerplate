@@ -63,8 +63,7 @@ func setupServer(t *testing.T) http.Handler {
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			RequestTimeout: 20 * time.Second,
 		},
-		Redis:     rootconfig.RedisConfig{Mode: rootconfig.RedisModeDisabled},
-		RateLimit: rootconfig.RateLimitConfig{Enabled: false},
+		Redis: rootconfig.RedisConfig{Mode: rootconfig.RedisModeDisabled},
 	}
 	srv, err := New(cfg, log, Deps{Users: svc, Postgres: pool})
 	if err != nil {
