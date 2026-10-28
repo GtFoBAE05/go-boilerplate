@@ -359,6 +359,18 @@ func TestLoadMigrate(t *testing.T) {
 			t.Fatalf("LoadMigrate: %v", err)
 		}
 	})
+	// The migration job must not decode API-only sections: an invalid OTel or
+	// server value would otherwise fail before the migration is even attempted.
+	t.Run("ignores invalid API-only settings", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvDevelopment)
+		t.Setenv("POSTGRES_DSN", "postgres://app:app@localhost:5433/app?sslmode=disable")
+		t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "not-a-number")
+		t.Setenv("SERVER_PORT", "not-a-number")
+		if _, err := LoadMigrate(); err != nil {
+			t.Fatalf("LoadMigrate must ignore API-only settings: %v", err)
+		}
+	})
 }
 
 func TestProductionRejectsInsecureRedisTLS(t *testing.T) {

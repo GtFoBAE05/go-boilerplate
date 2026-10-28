@@ -25,6 +25,14 @@ type Config struct {
 	Log      LogConfig      `mapstructure:"log"`
 }
 
+// MigrateConfig is the subset of Config cmd/migrate needs. Keeping the decode
+// target narrow is what stops an unrelated API setting from failing a migration.
+type MigrateConfig struct {
+	Service  ServiceConfig  `mapstructure:"service"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
+	Log      LogConfig      `mapstructure:"log"`
+}
+
 // DotEnvFile is the optional local overrides file, loaded from the working
 // directory. It is git-ignored; .env.example documents every key.
 const DotEnvFile = ".env"
@@ -45,8 +53,8 @@ func Load() (*Config, error) {
 
 // LoadMigrate loads only the settings cmd/migrate needs. The API's Redis and
 // telemetry settings must not block a migration job.
-func LoadMigrate() (*Config, error) {
-	cfg, err := load()
+func LoadMigrate() (*MigrateConfig, error) {
+	cfg, err := loadMigrate()
 	if err != nil {
 		return nil, err
 	}
@@ -57,9 +65,28 @@ func LoadMigrate() (*Config, error) {
 }
 
 func load() (*Config, error) {
+	var cfg Config
+	if err := loadInto(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func loadMigrate() (*MigrateConfig, error) {
+	var cfg MigrateConfig
+	if err := loadInto(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// loadInto decodes only the sections present in target. Viper still registers
+// every key so .env layering stays uniform, but mapstructure ignores keys that
+// the target does not declare - which is what keeps migration decoding narrow.
+func loadInto(target any) error {
 	dotEnv, err := platformconfig.ParseDotEnv(DotEnvFile)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	v := viper.New()
@@ -78,11 +105,10 @@ func load() (*Config, error) {
 		}
 	}
 
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+	if err := v.Unmarshal(target); err != nil {
+		return fmt.Errorf("unmarshal config: %w", err)
 	}
-	return &cfg, nil
+	return nil
 }
 
 // validate rejects values the app would otherwise silently misinterpret.
@@ -131,7 +157,7 @@ func (c *Config) validate() error {
 // validateMigrate keeps the migration job independent of the API's Redis and
 // telemetry settings. Production requires a dedicated DDL role so the runtime
 // role never needs CREATE/ALTER/DROP.
-func (c *Config) validateMigrate() error {
+func (c *MigrateConfig) validateMigrate() error {
 	errs := []error{
 		ValidateService(&c.Service),
 		ValidatePostgresMigration(&c.Postgres),

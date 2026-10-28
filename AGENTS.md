@@ -73,7 +73,8 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
 - Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=optional`,
   `POSTGRES_MIGRATE=false`, `LOG_FORMAT=json`, `LOG_LEVEL=info`,
   `PPROF_ENABLED=false`.
-- Production rejects boot migrations and insecure Redis TLS.
+- Production rejects boot migrations and `REDIS_TLS_INSECURE_SKIP_VERIFY=true`
+  when Redis is enabled.
 
 ### Data
 
