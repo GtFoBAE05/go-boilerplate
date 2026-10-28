@@ -8,6 +8,7 @@ keep human documentation there and do not add a separate `docs/` tree.
 ```bash
 cp .env.example .env
 make docker-up-all
+make observability-wait
 make observability-rules
 make run-observability
 make test test-integration lint gosec sqlc sqlc-diff vuln
@@ -99,16 +100,24 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   to local counters at startup.
 - `telemetry.Setup` runs before `postgres.NewPool` and `redis.New`.
 - The local stack is LGTM: app OTLP → collector → Tempo/Mimir; app stdout JSON
-  → `.tmp/logs/api.log` → collector `file_log` → Loki. Grafana is the UI.
+  → `.tmp/logs/api.log` → collector `file_log` → Loki. Grafana is the UI and
+  provisions the `Go Boilerplate - LGTM Overview` dashboard.
 - Keep `honor_labels: true` in the collector's `prometheus/self` receiver. It
   preserves the app's `job`/`instance` labels when the collector scrapes its own
   Prometheus exporter before remote-writing to Mimir.
 - Do not parse JSON log fields into OTLP attributes in the collector: Loki
   promotes attributes to labels, and `trace_id`/`request_id`/`path` would create
   unbounded streams. Keep them in the JSON body.
+- The collector reads the Loki `service.name` from `${env:SERVICE_NAME}`;
+  Compose supplies it from `.env`. Do not hardcode the template name there.
+- Loki, Tempo, and Mimir retain 24 hours locally. Mimir's retention lives under
+  `limits.compactor_blocks_retention_period`, not `compactor`.
 - `deploy/rules.yml` is loaded into Mimir's ruler by the one-shot `mimir-rules`
   service; `make observability-rules` reloads it. There is no local
   Alertmanager, so rules evaluate but do not notify.
+- Loki, Tempo, and Grafana have Compose healthchecks. Mimir and the collector
+  are distroless, so the one-shot `wait-for` service probes them over HTTP;
+  `make observability-wait` runs that gate explicitly.
 
 ## Deliberate decisions — do not “fix” these
 

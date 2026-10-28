@@ -52,11 +52,11 @@ curl -X POST localhost:8080/api/v1/users \
 1. Rename the module with `go mod edit -module github.com/you/your-service`, then
    replace the old import path across the repository.
 2. Update `.golangci.yml` (`module-path`, `local-prefixes`), the three `-ldflags`
-   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, the `resource/logs`
-   `service.name` in `deploy/otel-collector.yaml`, image names in `deploy/k8s/`,
-   the `job` label in `deploy/rules.yml`, and the CI badge/repository URLs.
-   `TestAlertRulesUseServiceName` fails if the rule label and `SERVICE_NAME`
-   drift apart.
+   paths in `Makefile` and `Dockerfile`, `SERVICE_NAME`, image names in
+   `deploy/k8s/`, the `job` label in `deploy/rules.yml`, and the CI
+   badge/repository URLs. The collector reads `SERVICE_NAME` from `.env` through
+   `${env:SERVICE_NAME}`; `TestAlertRulesUseServiceName` fails if the rule label
+   and `SERVICE_NAME` drift apart.
 3. Keep the `user` vertical as the reference, or delete it once your first real
    resource is in place.
 
@@ -283,11 +283,13 @@ target creates `.tmp/logs` before Compose mounts it; if you invoke Compose
 directly, run `mkdir -p .tmp/logs` first.
 
 - **Grafana**: <http://localhost:3000>. The Mimir, Loki, and Tempo datasources
-  are provisioned; Grafana runs as anonymous admin locally.
+  and the `Go Boilerplate - LGTM Overview` dashboard are provisioned; Grafana
+  runs as anonymous admin locally.
 - **Logs**: app stdout JSON → `.tmp/logs/api.log` → collector `file_log` →
   Loki. The app never pushes logs. Only bounded values become Loki labels;
   `trace_id`, `request_id`, and `path` stay in the JSON body, so query with
-  `| json`. Grafana's derived field turns `trace_id` into a Tempo link.
+  `| json`. Grafana's derived field turns `trace_id` into a Tempo link. The
+  collector takes the Loki `service.name` from `SERVICE_NAME` in `.env`.
 - **Traces**: app OTLP → collector → Tempo. Paste a `trace_id` into Grafana
   Explore (Tempo) or open it from a Loki log line.
 - **Metrics**: app OTLP → collector's Prometheus exporter → collector
@@ -297,13 +299,18 @@ directly, run `mkdir -p .tmp/logs` first.
   into Mimir's ruler with `mimirtool`. Reload after edits with
   `make observability-rules`. There is no Alertmanager locally, so rules
   evaluate but do not notify.
+- **Retention**: Loki, Tempo, and Mimir all keep data for 24 hours locally.
+- **Readiness**: Loki, Tempo, and Grafana have Compose healthchecks. Mimir and
+  the collector images are distroless, so the one-shot `wait-for` service
+  probes every HTTP endpoint instead; `make observability-wait` runs it
+  explicitly, and both `make docker-up-all` and `make observability-up` call it.
 - **Profiling**: pprof on a private loopback listener, off by default. Enable it
   with `PPROF_ENABLED=true`, then run
   `go tool pprof http://localhost:6060/debug/pprof/profile`.
 
 These compose files are local development configuration: filesystem storage, no
-auth, no TLS, and no replication. Production needs object storage, tenant
-isolation, and a real retention policy.
+auth, no TLS, no replication, and 24-hour retention. Production needs object
+storage, tenant isolation, and a real retention policy.
 
 The app is push-only, so it has no `up` series of its own. The collector scrapes
 its own Prometheus exporter, which produces `up{job="otel-collector"}`; both a
@@ -396,6 +403,7 @@ make docker-up          # postgres + redis
 make docker-up-all      # plus Loki, Tempo, Mimir, Grafana, otel-collector
 make observability-up   # observability only
 make observability-down # stop observability only
+make observability-wait # wait until every LGTM endpoint is ready
 make observability-rules # reload deploy/rules.yml into Mimir
 make run-observability  # API with JSON logs teed to .tmp/logs/api.log
 make test               # go test -race ./...

@@ -40,11 +40,12 @@ processors:
     limit_mib: 256
   # Loki needs at least one bounded stream label. The JSON body still carries
   # the original service field, but this resource attribute is what Grafana
-  # groups streams by. Update it when the template is renamed.
+  # groups streams by. Compose passes SERVICE_NAME from .env, so renaming the
+  # template does not leave this pipeline on the old name.
   resource/logs:
     attributes:
       - key: service.name
-        value: go-boilerplate
+        value: ${env:SERVICE_NAME}
         action: upsert
 
 exporters:
@@ -75,9 +76,13 @@ extensions:
   file_storage:
     directory: /var/lib/otelcol
     create_directory: true
+  # The collector image is distroless, so Compose cannot run an in-container
+  # HTTP probe. This endpoint is what the wait-for service checks instead.
+  health_check:
+    endpoint: 0.0.0.0:13133
 
 service:
-  extensions: [file_storage]
+  extensions: [file_storage, health_check]
   pipelines:
     logs:
       receivers: [file_log]

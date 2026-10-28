@@ -16,6 +16,11 @@ blocks_storage:
   tsdb:
     dir: /data/tsdb
 
+limits:
+  # Keep local metrics for one day, matching Loki and Tempo. Mimir's default is
+  # zero, which disables block deletion and lets the volume grow forever.
+  compactor_blocks_retention_period: 24h
+
 compactor:
   data_dir: /data/compactor
   sharding_ring:
