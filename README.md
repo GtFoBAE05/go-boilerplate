@@ -209,8 +209,9 @@ Dependencies:
   Redis fails readiness when it is down. No shipped feature consumes Redis yet.
 - Rate limiting is not built in. Terminate it at the ingress/gateway or add a
   limiter deliberately when a policy is known.
-- Redis TLS verification is on by default; skipping it is rejected in
-  production.
+- Redis TLS is off by default. When `REDIS_TLS_ENABLED=true`, certificate
+  verification is on unless `REDIS_TLS_INSECURE_SKIP_VERIFY=true`; production
+  rejects that escape hatch when Redis is enabled.
 - Production migrations belong to the deploy pipeline, not the app.
 - `POSTGRES_MIGRATION_DSN` is used only by `cmd/migrate`. In production it must
   point at a DDL role, so the runtime role never needs `CREATE`/`ALTER`/`DROP`.

@@ -12,6 +12,7 @@ package repository_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -183,4 +184,54 @@ func TestUserRepositoryCRUD(t *testing.T) {
 	if rows != 0 {
 		t.Fatalf("delete missing row: want 0 rows affected, got %d", rows)
 	}
+}
+
+func TestStoreExecTxCommitAndRollback(t *testing.T) {
+	ctx := context.Background()
+	store := repository.NewStore(setupPool(t))
+
+	t.Run("commit", func(t *testing.T) {
+		var created repository.User
+		err := store.ExecTx(ctx, func(q repository.Querier) error {
+			var err error
+			created, err = q.CreateUser(ctx, repository.CreateUserParams{
+				Name:  "tx-commit",
+				Email: "tx-commit@example.com",
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("ExecTx commit: %v", err)
+		}
+
+		got, err := store.GetUser(ctx, created.ID)
+		if err != nil {
+			t.Fatalf("get committed user: %v", err)
+		}
+		if got.ID != created.ID || got.Email != created.Email {
+			t.Fatalf("committed user mismatch: got %+v want %+v", got, created)
+		}
+	})
+
+	t.Run("rollback", func(t *testing.T) {
+		rollbackErr := errors.New("force rollback")
+		var createdID int64
+		err := store.ExecTx(ctx, func(q repository.Querier) error {
+			created, err := q.CreateUser(ctx, repository.CreateUserParams{
+				Name:  "tx-rollback",
+				Email: "tx-rollback@example.com",
+			})
+			if err != nil {
+				return err
+			}
+			createdID = created.ID
+			return rollbackErr
+		})
+		if !errors.Is(err, rollbackErr) {
+			t.Fatalf("ExecTx rollback: want sentinel error, got %v", err)
+		}
+		if _, err := store.GetUser(ctx, createdID); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("rolled-back row must not exist: want pgx.ErrNoRows, got %v", err)
+		}
+	})
 }
