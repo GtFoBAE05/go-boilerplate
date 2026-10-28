@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"reflect"
 	"strings"
@@ -14,11 +13,9 @@ import (
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler"
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler/health"
 	"github.com/GtFoBAE05/go-boilerplate/internal/handler/user"
-	"github.com/GtFoBAE05/go-boilerplate/internal/platform/ratelimit"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/httprate"
 	goredis "github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -34,34 +31,6 @@ type Server struct {
 	http   *http.Server
 	log    *slog.Logger
 	health *health.Handler
-}
-
-// keyByRemoteIP buckets counters by RemoteAddr. trustedProxy rewrites it from
-// X-Forwarded-For only when the TCP peer is a configured proxy; on a parse
-// failure it falls back to the raw value so limiting still applies.
-func keyByRemoteIP(r *http.Request) (string, error) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr, nil
-	}
-	return host, nil
-}
-
-// rateLimitOptions adds the shared Redis counter when configured; without Redis
-// the limiter is per-process, and a Redis error fails closed with 503.
-func rateLimitOptions(client *goredis.Client, prefix string, log *slog.Logger) []httprate.Option {
-	if client == nil {
-		return nil
-	}
-	return []httprate.Option{
-		httprate.WithLimitCounter(ratelimit.RedisCounter(client, prefix)),
-		httprate.WithErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
-			log.ErrorContext(r.Context(), "distributed rate limit failed closed", "prefix", prefix, "error", err)
-			w.Header().Set("Retry-After", "1")
-			handler.WriteError(w, http.StatusServiceUnavailable, handler.CodeRateLimitUnavailable,
-				"rate limiting is temporarily unavailable")
-		}),
-	}
 }
 
 // redisPinger adapts *goredis.Client to health.Pinger.
@@ -83,8 +52,7 @@ type Deps struct {
 	// it and typed-nil pools are detectable.
 	Postgres health.Pinger
 	Redis    *goredis.Client
-	// RedisRequired makes a failing Redis ping fail /readyz; New also requires it
-	// when the fail-closed rate limiter uses Redis.
+	// RedisRequired makes a failing Redis ping fail /readyz.
 	RedisRequired bool
 	// RedisUnavailable carries the startup error when optional Redis could not be
 	// reached; Redis is nil then, so /readyz can still report "degraded".
@@ -159,12 +127,8 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 
 	required := map[string]health.Pinger{"postgres": deps.Postgres}
 	optional := map[string]health.Pinger{}
-	// The limiter fails closed when its Redis counter errors. If it is using
-	// Redis, readiness must fail too: reporting 200/degraded while every API
-	// request is a 503 would keep a broken replica in rotation.
-	redisRequiredForReadiness := deps.RedisRequired || (cfg.RateLimit.Enabled && deps.Redis != nil)
 	if deps.Redis != nil {
-		if redisRequiredForReadiness {
+		if deps.RedisRequired {
 			required["redis"] = redisPinger{rdb: deps.Redis}
 		} else {
 			optional["redis"] = redisPinger{rdb: deps.Redis}
@@ -181,29 +145,6 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 	// endpoint exposes route patterns, latency, or pool sizes.
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Rate limit only the API subtree so constant health probes are never
-		// throttled; exceeding the per-IP budget returns 429.
-		if cfg.RateLimit.Enabled {
-			// Not httprate's KeyByRealIP: it trusts forwarded headers
-			// (GHSA-9g5q-2w5x-hmxf).
-			options := []httprate.Option{
-				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
-					retry := int(cfg.RateLimit.Window.Seconds())
-					if retry < 1 {
-						retry = 1
-					}
-					w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
-					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
-				}),
-			}
-			options = append(options, rateLimitOptions(deps.Redis, cfg.Service.Name+":api", log)...)
-			r.Use(httprate.LimitBy(
-				cfg.RateLimit.Requests,
-				cfg.RateLimit.Window,
-				keyByRemoteIP,
-				options...,
-			))
-		}
 		r.Mount("/users", user.NewHandler(deps.Users, log).Routes())
 	})
 

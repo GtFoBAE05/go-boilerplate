@@ -131,9 +131,8 @@ func parseTrustedProxyCIDRs(value string) ([]*net.IPNet, error) {
 }
 
 // trustedProxy rewrites RemoteAddr from X-Forwarded-For only when the TCP peer
-// is a configured proxy. Without this, every request behind an ingress shares
-// one rate-limit bucket; trusting the header unconditionally lets clients spoof
-// their way around it.
+// is a configured proxy. Without this, every request behind an ingress logs the
+// proxy's address; trusting the header unconditionally lets clients spoof it.
 func trustedProxy(nets []*net.IPNet) func(http.Handler) http.Handler {
 	if len(nets) == 0 {
 		return func(next http.Handler) http.Handler { return next }

@@ -65,12 +65,12 @@ curl -X POST localhost:8080/api/v1/users \
 - **Type-safe SQL** — sqlc generates Go from raw SQL; no ORM or reflection.
 - **Migrations** — goose files embedded in the binary; production runs them from
   a deploy job.
-- **Redis rate limiting** — `REDIS_MODE=disabled|optional|required`; production
-  uses a shared counter.
+- **Optional Redis infrastructure** — `REDIS_MODE=disabled|optional|required`,
+  client tracing, and readiness reporting; no built-in feature requires it yet.
 - **Observability** — OpenTelemetry traces and metrics over OTLP, trace-correlated
   `slog` logs, and a local LGTM stack (Loki, Grafana, Tempo, Mimir).
 - **Hardened HTTP** — strict JSON and content type, 1 MiB body cap, deadlines,
-  trusted-proxy-aware per-IP limits, and one response envelope.
+  trusted-proxy handling, and one response envelope.
 - **Safe data access** — server-side statement/lock/idle timeouts, rollback
   cleanup after a canceled request, and an advisory-locked migration job.
 - **Guardrail CI** — SHA-pinned actions, digest-pinned images, lint, `gosec`,
@@ -81,8 +81,7 @@ curl -X POST localhost:8080/api/v1/users \
 
 ```mermaid
 flowchart LR
-    C[Client] --> M[chi router\nrequest-id · logging · recover\ntimeout · rate limit]
-    M -->|rate-limit counter| R[(Redis)]
+    C[Client] --> M[chi router\nrequest-id · logging · recover\ntimeout]
     M --> H[handler\ndecode · validate · envelope]
     H --> S[service\nbusiness logic · domain errors]
     S --> Q[repository\nsqlc + pgx]
@@ -98,7 +97,7 @@ cmd/api/              HTTP entry point
 cmd/migrate/          advisory-locked migration job
 internal/app/         lifecycle + dependency wiring
 internal/config/      config, defaults, validation
-internal/platform/    generic infra: postgres, redis, ratelimit, telemetry, errors
+internal/platform/    generic infra: postgres, redis, telemetry, errors
 internal/repository/  sqlc output + transaction store
 internal/service/     use-case services (user is the example)
 internal/handler/     HTTP plumbing + resource handlers
@@ -149,10 +148,9 @@ structured context.
 | Body | 1 MiB cap; unknown/duplicate JSON fields rejected; validation failures return 422 |
 | Content type | JSON writes require `application/json` or `+json`; otherwise 415 |
 | Pagination | `limit` 1–100, non-negative `offset`; malformed values return 422 |
-| Rate limit | Per client IP; 429 over limit; Redis failure fails closed with 503 |
 | Proxies | `X-Forwarded-For` is honored only when the TCP peer is in `SERVER_TRUSTED_PROXY_CIDRS` |
 | Timeouts | `server.request_timeout` aborts downstream work and returns 504 `TIMEOUT` |
-| Headers | `Cache-Control: no-store` on every response, `nosniff`, `Allow` on 405, `Retry-After` on 429/503 |
+| Headers | `Cache-Control: no-store` on every response, `nosniff`, `Allow` on 405 |
 | Request ID | A valid `X-Request-Id` is kept and echoed; otherwise one is generated and echoed |
 
 Business rules are validated in the handler, repeated in the service, and
@@ -162,7 +160,7 @@ enforced by the database (`CHECK`, `lower(email)` unique index).
 
 Transport codes live in `internal/handler`: `BAD_REQUEST`, `VALIDATION_FAILED`,
 `NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`,
-`RATE_LIMITED`, `RATE_LIMIT_UNAVAILABLE`, `TIMEOUT`, `INTERNAL`.
+`TIMEOUT`, `INTERNAL`.
 
 Domain codes live with the error:
 
@@ -178,7 +176,7 @@ Configuration is environment-only: **environment > `.env` > built-in default**.
 `.env.example` is the source of truth. Every key is registered, defaulted, and
 validated at boot; all errors are reported together.
 
-Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=required`,
+Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=optional`,
 `POSTGRES_MIGRATE=false`, JSON logs at `info`, `PPROF_ENABLED=false`.
 There is deliberately no default `POSTGRES_DSN`, and no default OTLP endpoint
 while telemetry is enabled: a deployment must set them explicitly. Production
@@ -200,18 +198,17 @@ Gotchas:
   requests cannot leave queries or locks behind. `POSTGRES_MAX_CONN_LIFETIME_JITTER`
   spreads reconnects across replicas.
 - `SERVER_TRUSTED_PROXY_CIDRS` is empty by default. Set it to the ingress or
-  load-balancer CIDRs (comma-separated) so rate limiting keys off the real
-  client; never trust `X-Forwarded-For` from an arbitrary peer.
+  load-balancer CIDRs (comma-separated) so logs use the real client address;
+  never trust `X-Forwarded-For` from an arbitrary peer.
 
 Dependencies:
 
 - **Postgres** is required; an unreachable database at startup is fatal.
 - **Redis** is `disabled`, `optional`, or `required`. Optional Redis that is
-  unreachable at startup reports `degraded` on `/readyz` and stays 200. If the
-  rate limiter is using Redis, a later Redis failure fails readiness (503)
-  because the limiter fails closed.
-- Production rate limiting needs a shared counter. Production with optional or
-  disabled Redis fails boot unless `RATELIMIT_ALLOW_PROCESS_LOCAL=true`.
+  unreachable at startup reports `degraded` on `/readyz` and stays 200; required
+  Redis fails readiness when it is down. No shipped feature consumes Redis yet.
+- Rate limiting is not built in. Terminate it at the ingress/gateway or add a
+  limiter deliberately when a policy is known.
 - Redis TLS verification is on by default; skipping it is rejected in
   production.
 - Production migrations belong to the deploy pipeline, not the app.

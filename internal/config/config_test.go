@@ -163,8 +163,6 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"zero statement timeout", func(c *Config) { c.Postgres.StatementTimeout = 0 }, "statement_timeout"},
 		{"bad exec mode", func(c *Config) { c.Postgres.QueryExecMode = "prepared" }, "query_exec_mode"},
 		{"bad redis mode", func(c *Config) { c.Redis.Mode = "maybe" }, "redis.mode"},
-		{"production optional redis with limiter", func(c *Config) { c.Redis.Mode = RedisModeOptional }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
-		{"production disabled redis with limiter", func(c *Config) { c.Redis.Mode = RedisModeDisabled }, "RATELIMIT_ALLOW_PROCESS_LOCAL"},
 		{"bad log level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 		{"bad log format", func(c *Config) { c.Log.Format = "xml" }, "log.format"},
 		{"sampler arg above 1", func(c *Config) { c.OTel.TracesSamplerArg = 1.5 }, "otel.traces_sampler_arg"},
@@ -174,7 +172,6 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		// decides whether the connection is encrypted.
 		{"endpoint without scheme", func(c *Config) { c.OTel.Endpoint = "localhost:4317" }, "scheme"},
 		{"zero metric interval", func(c *Config) { c.OTel.MetricExportIntervalMillis = 0 }, "otel.metric_export_interval"},
-		{"zero ratelimit requests", func(c *Config) { c.RateLimit.Requests = 0 }, "ratelimit.requests"},
 	}
 
 	for _, tt := range tests {
@@ -188,46 +185,6 @@ func TestValidateRejectsBadValues(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("want error mentioning %q, got %v", tt.wantErr, err)
-			}
-		})
-	}
-}
-
-func TestLoadProductionRateLimitRedisGuard(t *testing.T) {
-	tests := []struct {
-		name       string
-		env        string
-		redisMode  string
-		enabled    string
-		allowLocal string
-		wantErr    string
-	}{
-		{"production optional", EnvProduction, string(RedisModeOptional), "true", "false", "RATELIMIT_ALLOW_PROCESS_LOCAL"},
-		{"production optional with explicit local budget", EnvProduction, string(RedisModeOptional), "true", "true", ""},
-		{"production required", EnvProduction, string(RedisModeRequired), "true", "false", ""},
-		{"development optional", EnvDevelopment, string(RedisModeOptional), "true", "false", ""},
-		{"production optional with limiter disabled", EnvProduction, string(RedisModeOptional), "false", "false", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Chdir(t.TempDir())
-			t.Setenv("SERVICE_ENV", tt.env)
-			t.Setenv("REDIS_MODE", tt.redisMode)
-			t.Setenv("RATELIMIT_ENABLED", tt.enabled)
-			t.Setenv("RATELIMIT_ALLOW_PROCESS_LOCAL", tt.allowLocal)
-			t.Setenv("POSTGRES_DSN", testProductionDSN)
-			t.Setenv("OTEL_SDK_DISABLED", "true")
-
-			_, err := Load()
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("Load() error = %v, want nil", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Load() error = %v, want message containing %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -298,7 +255,8 @@ func TestDisabledOTelSettingsAreInert(t *testing.T) {
 }
 
 // The production-safe defaults matter because a deployment ships no file:
-// migration and a per-process limiter must be opt-in.
+// migration must be opt-in, and Redis must not be required by a feature the
+// template no longer ships.
 func TestProductionDefaultsAreSafe(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("POSTGRES_DSN", testProductionDSN)
@@ -311,8 +269,8 @@ func TestProductionDefaultsAreSafe(t *testing.T) {
 	if cfg.Service.Env != EnvProduction {
 		t.Fatalf("service.env must default to production, got %q", cfg.Service.Env)
 	}
-	if cfg.Redis.Mode != RedisModeRequired {
-		t.Fatalf("redis.mode must default to required, got %q", cfg.Redis.Mode)
+	if cfg.Redis.Mode != RedisModeOptional {
+		t.Fatalf("redis.mode must default to optional, got %q", cfg.Redis.Mode)
 	}
 	if cfg.Postgres.Migrate {
 		t.Fatal("postgres.migrate must default to false")
@@ -478,7 +436,7 @@ func validConfig() *Config {
 			StatementTimeout: 10 * time.Second, LockTimeout: 5 * time.Second,
 			IdleInTransactionTimeout: 30 * time.Second, QueryExecMode: "cache_statement",
 		},
-		// This fixture is production-shaped, so its limiter uses shared Redis.
+		// This fixture is production-shaped: Redis is required and validated.
 		Redis: RedisConfig{
 			Mode: RedisModeRequired, Addr: "localhost:6380",
 			DialTimeout: 5 * time.Second, ReadTimeout: 3 * time.Second,
@@ -489,8 +447,7 @@ func validConfig() *Config {
 			Endpoint: "http://localhost:4317", TracesSampler: "parentbased_traceidratio",
 			TracesSamplerArg: 1.0, MetricExportIntervalMillis: 60000,
 		},
-		Log:       LogConfig{Level: "info", Format: "json"},
-		RateLimit: RateLimitConfig{Enabled: true, Requests: 40, Window: time.Second},
+		Log: LogConfig{Level: "info", Format: "json"},
 	}
 }
 

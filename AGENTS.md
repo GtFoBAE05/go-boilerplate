@@ -56,7 +56,7 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   before validation, `validate` tags.
 - `DecodePage`: invalid `limit`/`offset` is 422, not clamped.
 - Rows-affected writes map 0 rows to `service.ErrNotFound`; never a silent 204.
-- No `RealIP`; rate limiting keys off `RemoteAddr`.
+- No `RealIP`; `trustedProxy` is the CIDR-gated replacement for `RemoteAddr`.
 - A panic after a response has started aborts the connection; it cannot be
   turned into an error envelope.
 
@@ -70,11 +70,10 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   secrets implement `slog.LogValuer`.
 - Precedence is environment > `.env` > defaults. `.env` is layered as Viper
   defaults, never exported with `os.Setenv`.
-- Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=required`,
+- Production defaults: `SERVICE_ENV=production`, `REDIS_MODE=optional`,
   `POSTGRES_MIGRATE=false`, `LOG_FORMAT=json`, `LOG_LEVEL=info`,
   `PPROF_ENABLED=false`.
-- Production rejects boot migrations, process-local rate limiting without
-  `RATELIMIT_ALLOW_PROCESS_LOCAL=true`, and insecure Redis TLS.
+- Production rejects boot migrations and insecure Redis TLS.
 
 ### Data
 
@@ -94,10 +93,8 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
   user id, email, or `trace_id`. Do not add `/metrics`.
 - Probes are excluded from tracing/metrics; `/readyz` pings under an unsampled
   parent span.
-- Redis is required for `/readyz` whenever the rate limiter uses it: the limiter
-  fails closed, so a 200/degraded probe would keep a replica answering 503 in
-  rotation. Optional Redis is only optional when the limiter is off or fell back
-  to local counters at startup.
+- Redis readiness follows `REDIS_MODE`: optional Redis reports `degraded` while
+  `/readyz` stays 200, and required Redis fails `/readyz` (503) when down.
 - `telemetry.Setup` runs before `postgres.NewPool` and `redis.New`.
 - The local stack is LGTM: app OTLP → collector → Tempo/Mimir; app stdout JSON
   → `.tmp/logs/api.log` → collector `file_log` → Loki. Grafana is the UI and
@@ -122,6 +119,8 @@ Adding a resource: migration → queries/sqlc → copy service/handler → wire
 ## Deliberate decisions — do not “fix” these
 
 - No auth, Swagger/OpenAPI, mock generators, or CORS.
+- No built-in rate limiting; terminate it at the ingress/gateway or add it
+  deliberately when a policy is known.
 - The app is not in either compose file; they are local infrastructure.
 - Offset pagination is the default; switch a resource to keyset past ~10k rows.
 - Provenance comes from `-ldflags` into `internal/app/version.go`;

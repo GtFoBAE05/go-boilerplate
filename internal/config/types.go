@@ -232,15 +232,3 @@ type LogConfig struct {
 	Level  string `mapstructure:"level"`
 	Format string `mapstructure:"format"`
 }
-
-// RateLimitConfig bounds per-client-IP request rate on the API subtree; probes
-// are never limited. The counter is shared across replicas when Redis is
-// available, so the cap is global rather than per-process.
-type RateLimitConfig struct {
-	Enabled  bool          `mapstructure:"enabled"`
-	Requests int           `mapstructure:"requests"`
-	Window   time.Duration `mapstructure:"window"`
-	// AllowProcessLocal acknowledges one budget per process; production otherwise
-	// requires Redis, because N local counters silently allow N*requests.
-	AllowProcessLocal bool `mapstructure:"allow_process_local"`
-}
