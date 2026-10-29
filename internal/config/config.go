@@ -28,9 +28,9 @@ type Config struct {
 // MigrateConfig is the subset of Config cmd/migrate needs. Keeping the decode
 // target narrow is what stops an unrelated API setting from failing a migration.
 type MigrateConfig struct {
-	Service  ServiceConfig  `mapstructure:"service"`
-	Postgres PostgresConfig `mapstructure:"postgres"`
-	Log      LogConfig      `mapstructure:"log"`
+	Service  ServiceConfig         `mapstructure:"service"`
+	Postgres MigratePostgresConfig `mapstructure:"postgres"`
+	Log      LogConfig             `mapstructure:"log"`
 }
 
 // DotEnvFile is the optional local overrides file, loaded from the working

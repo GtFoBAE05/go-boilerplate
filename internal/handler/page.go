@@ -25,37 +25,48 @@ type Page struct {
 func (p Page) Meta() Meta { return Meta(p) }
 
 // DecodePage reads ?limit and ?offset. An absent parameter takes its default;
-// a malformed or out-of-range one is rejected with 422 and returns ok=false.
-// Rejecting beats clamping: silently substituting a default hides the error.
+// a malformed, empty, repeated, or out-of-range one is rejected with 422 and
+// returns ok=false. Rejecting beats clamping: silently substituting a default
+// hides the error, and silently picking one of several values hides ambiguity.
 func DecodePage(w http.ResponseWriter, r *http.Request) (Page, bool) {
 	q := r.URL.Query()
 	fields := map[string]string{}
 
 	limit := DefaultLimit
-	if raw := q.Get("limit"); raw != "" {
-		n, err := strconv.ParseInt(raw, 10, 32)
+	if values, ok := q["limit"]; ok {
 		switch {
-		case err != nil:
-			fields["limit"] = "must be an integer"
-		case n < 1:
-			fields["limit"] = "must be at least 1"
-		case int32(n) > MaxLimit:
-			fields["limit"] = fmt.Sprintf("must be at most %d", MaxLimit)
+		case len(values) != 1:
+			fields["limit"] = "must be specified once"
 		default:
-			limit = int32(n)
+			n, err := strconv.ParseInt(values[0], 10, 32)
+			switch {
+			case err != nil:
+				fields["limit"] = "must be an integer"
+			case n < 1:
+				fields["limit"] = "must be at least 1"
+			case int32(n) > MaxLimit:
+				fields["limit"] = fmt.Sprintf("must be at most %d", MaxLimit)
+			default:
+				limit = int32(n)
+			}
 		}
 	}
 
 	offset := int32(0)
-	if raw := q.Get("offset"); raw != "" {
-		n, err := strconv.ParseInt(raw, 10, 32)
+	if values, ok := q["offset"]; ok {
 		switch {
-		case err != nil:
-			fields["offset"] = "must be an integer"
-		case n < 0:
-			fields["offset"] = "must not be negative"
+		case len(values) != 1:
+			fields["offset"] = "must be specified once"
 		default:
-			offset = int32(n)
+			n, err := strconv.ParseInt(values[0], 10, 32)
+			switch {
+			case err != nil:
+				fields["offset"] = "must be an integer"
+			case n < 0:
+				fields["offset"] = "must not be negative"
+			default:
+				offset = int32(n)
+			}
 		}
 	}
 

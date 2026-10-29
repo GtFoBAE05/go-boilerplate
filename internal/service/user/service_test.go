@@ -90,6 +90,24 @@ func TestCreateMapsUniqueViolationToEmailTaken(t *testing.T) {
 	}
 }
 
+// A different unique index whose name happens to contain "email" is not the
+// email rule; matching a substring would turn an unrelated conflict into 409.
+func TestCreateDoesNotMapOtherUniqueViolationToEmailTaken(t *testing.T) {
+	repo := &fakeStore{
+		createUser: func(context.Context, repository.CreateUserParams) (repository.User, error) {
+			return repository.User{}, &pgconn.PgError{
+				Code: "23505", ConstraintName: "users_email_key",
+			}
+		},
+	}
+	svc := NewUserService(repo, discardLogger())
+
+	_, err := svc.Create(context.Background(), CreateInput{Name: "alice", Email: "a@example.com"})
+	if errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("unrelated unique constraint mapped to ErrEmailTaken: %v", err)
+	}
+}
+
 func TestCreateNormalizesBeforeWriting(t *testing.T) {
 	var got repository.CreateUserParams
 	repo := &fakeStore{

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"slices"
@@ -147,16 +148,35 @@ func ValidatePostgres(c *PostgresConfig) error {
 }
 
 // ValidatePostgresMigration accepts either the runtime DSN or a dedicated
-// migration DSN, so a production migration job never needs the API's role.
-func ValidatePostgresMigration(c *PostgresConfig) error {
+// migration DSN, so a production migration job never needs the API's role. It
+// validates only the pool settings cmd/migrate actually passes; rejecting an
+// unused API pool setting would block a migration for no reason.
+func ValidatePostgresMigration(c *MigratePostgresConfig) error {
+	var errs []error
 	if strings.TrimSpace(c.DSN) == "" && strings.TrimSpace(c.MigrationDSN) == "" {
-		return errors.New("postgres.migration_dsn or postgres.dsn must be set")
+		errs = append(errs, errors.New("postgres.migration_dsn or postgres.dsn must be set"))
 	}
-	copy := *c
-	if strings.TrimSpace(copy.DSN) == "" {
-		copy.DSN = copy.MigrationDSN
+	if c.MaxConnLifetime < 0 {
+		errs = append(errs, fmt.Errorf("postgres.max_conn_lifetime must not be negative, got %s",
+			c.MaxConnLifetime))
 	}
-	return ValidatePostgres(&copy)
+	if c.MaxConnLifetimeJitter < 0 {
+		errs = append(errs, fmt.Errorf("postgres.max_conn_lifetime_jitter must not be negative, got %s",
+			c.MaxConnLifetimeJitter))
+	}
+	if c.MaxConnLifetime > 0 && c.MaxConnLifetimeJitter > c.MaxConnLifetime {
+		errs = append(errs, fmt.Errorf(
+			"postgres.max_conn_lifetime_jitter (%s) must be <= postgres.max_conn_lifetime (%s)",
+			c.MaxConnLifetimeJitter, c.MaxConnLifetime))
+	}
+	switch c.QueryExecMode {
+	case "cache_statement", "cache_describe", "describe_exec", "exec", "simple_protocol":
+	default:
+		errs = append(errs, fmt.Errorf(
+			"postgres.query_exec_mode must be one of cache_statement|cache_describe|describe_exec|exec|simple_protocol, got %q",
+			c.QueryExecMode))
+	}
+	return errors.Join(errs...)
 }
 
 // validatePostgresTLS requires certificate verification, not merely encryption.
@@ -254,8 +274,10 @@ func ValidateOTel(c *OTelConfig) error {
 			errs = append(errs, fmt.Errorf("otel.traces_sampler must be one of %s, got %q",
 				strings.Join(OTelSamplers, "|"), c.TracesSampler))
 		}
-		if c.TracesSamplerArg < 0 || c.TracesSamplerArg > 1 {
-			errs = append(errs, fmt.Errorf("otel.traces_sampler_arg must be in 0.0..1.0, got %v",
+		// NaN compares false to both bounds, so it would otherwise slip through
+		// and become a sampler ratio that silently samples nothing.
+		if math.IsNaN(c.TracesSamplerArg) || c.TracesSamplerArg < 0 || c.TracesSamplerArg > 1 {
+			errs = append(errs, fmt.Errorf("otel.traces_sampler_arg must be a finite number in 0.0..1.0, got %v",
 				c.TracesSamplerArg))
 		}
 	}

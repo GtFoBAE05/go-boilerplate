@@ -7,6 +7,20 @@ import (
 	platformconfig "github.com/GtFoBAE05/go-boilerplate/internal/platform/config"
 )
 
+// LogValue makes logging the whole Config safe: every section that can carry a
+// credential implements LogValue, and OTel endpoints are reduced to a marker.
+func (c Config) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Any("service", c.Service),
+		slog.Any("server", c.Server),
+		slog.Any("pprof", c.Pprof),
+		slog.Any("postgres", c.Postgres),
+		slog.Any("redis", c.Redis),
+		slog.Any("otel", c.OTel),
+		slog.Any("log", c.Log),
+	)
+}
+
 // ServiceConfig identifies this service in logs and telemetry. It is a section
 // so the variables read SERVICE_NAME and SERVICE_ENV, not collision-prone NAME/ENV.
 type ServiceConfig struct {
@@ -93,6 +107,17 @@ func (p PostgresConfig) LogValue() slog.Value {
 	)
 }
 
+// MigratePostgresConfig is the subset of PostgresConfig cmd/migrate actually
+// uses. The migration job hardcodes its pool size and does not pass the API's
+// statement timeouts, so those settings must not block it even when malformed.
+type MigratePostgresConfig struct {
+	DSN                   string        `mapstructure:"dsn"`
+	MigrationDSN          string        `mapstructure:"migration_dsn"`
+	MaxConnLifetime       time.Duration `mapstructure:"max_conn_lifetime"`
+	MaxConnLifetimeJitter time.Duration `mapstructure:"max_conn_lifetime_jitter"`
+	QueryExecMode         string        `mapstructure:"query_exec_mode"`
+}
+
 // RedisMode controls how the app treats its Redis dependency.
 type RedisMode string
 
@@ -174,6 +199,31 @@ type OTelConfig struct {
 
 	// MetricExportIntervalMillis is the push period, in milliseconds.
 	MetricExportIntervalMillis int `mapstructure:"metric_export_interval"`
+}
+
+// LogValue keeps endpoint userinfo and query credentials out of logs while
+// preserving the rest of the telemetry settings.
+func (o OTelConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Bool("sdk_disabled", o.SDKDisabled),
+		slog.String("traces_exporter", o.TracesExporter),
+		slog.String("metrics_exporter", o.MetricsExporter),
+		slog.String("endpoint", redactedEndpoint(o.Endpoint)),
+		slog.String("traces_endpoint", redactedEndpoint(o.TracesEndpoint)),
+		slog.String("metrics_endpoint", redactedEndpoint(o.MetricsEndpoint)),
+		slog.String("traces_sampler", o.TracesSampler),
+		slog.Float64("traces_sampler_arg", o.TracesSamplerArg),
+		slog.Int("metric_export_interval_millis", o.MetricExportIntervalMillis),
+	)
+}
+
+// redactedEndpoint reports presence without echoing a URL that may contain
+// credentials in userinfo or query parameters.
+func redactedEndpoint(endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	return "[redacted]"
 }
 
 // TracesEnabled reports whether spans should be exported.

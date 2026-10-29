@@ -93,8 +93,10 @@ func NewSampler(name string, arg float64) (sdktrace.Sampler, error) {
 }
 
 // Setup installs the global tracer and meter providers; the returned function
-// flushes and shuts them down. Absent signals leave OTel's no-op in place.
-func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(context.Context) error, error) {
+// flushes and shuts them down. Absent signals leave OTel's no-op in place. If
+// any step after a provider is built fails, the built providers are shut down
+// before the error is returned so no exporter is left running.
+func Setup(ctx context.Context, serviceName, env string, opts ...Option) (shutdown func(context.Context) error, err error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -128,6 +130,19 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(c
 	}
 
 	var shutdowns []func(context.Context) error
+	defer func() {
+		if err == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, fn := range shutdowns {
+			_ = fn(cleanupCtx)
+		}
+	}()
+
+	var tracerProvider *sdktrace.TracerProvider
+	var meterProvider *sdkmetric.MeterProvider
 
 	// Traces: OTLP over gRPC (Tempo or any OTLP collector).
 	if t := o.tracing; t != nil {
@@ -135,12 +150,11 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(c
 		if err != nil {
 			return nil, fmt.Errorf("create otlp trace exporter: %w", err)
 		}
-		tracerProvider := sdktrace.NewTracerProvider(
+		tracerProvider = sdktrace.NewTracerProvider(
 			sdktrace.WithBatcher(traceExporter),
 			sdktrace.WithResource(res),
 			sdktrace.WithSampler(t.sampler),
 		)
-		otel.SetTracerProvider(tracerProvider)
 		shutdowns = append(shutdowns, tracerProvider.Shutdown)
 	}
 
@@ -150,13 +164,12 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(c
 		if err != nil {
 			return nil, fmt.Errorf("create otlp metric exporter: %w", err)
 		}
-		meterProvider := sdkmetric.NewMeterProvider(
+		meterProvider = sdkmetric.NewMeterProvider(
 			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter,
 				sdkmetric.WithInterval(m.interval),
 			)),
 			sdkmetric.WithResource(res),
 		)
-		otel.SetMeterProvider(meterProvider)
 		shutdowns = append(shutdowns, meterProvider.Shutdown)
 
 		// Explicit because no client_golang registry contributes a Go
@@ -167,12 +180,21 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (func(c
 		}
 	}
 
+	// Install globals only after every exporter is ready: a partial failure
+	// must not leave the process pointed at a provider this function will shut
+	// down before returning.
+	if tracerProvider != nil {
+		otel.SetTracerProvider(tracerProvider)
+	}
+	if meterProvider != nil {
+		otel.SetMeterProvider(meterProvider)
+	}
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
 
-	shutdown := func(ctx context.Context) error {
+	shutdown = func(ctx context.Context) error {
 		var errs error
 		for _, fn := range shutdowns {
 			errs = errors.Join(errs, fn(ctx))

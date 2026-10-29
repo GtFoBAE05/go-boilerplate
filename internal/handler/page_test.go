@@ -41,11 +41,15 @@ func TestDecodePageRejectsBadValues(t *testing.T) {
 		wantField string
 	}{
 		{"limit=abc", "limit"},
+		{"limit=", "limit"},
+		{"limit=20&limit=30", "limit"},
 		{"limit=0", "limit"},
 		{"limit=-3", "limit"},
 		{fmt.Sprintf("limit=%d", MaxLimit+1), "limit"},
 		{"limit=99999999999999999999", "limit"},
 		{"offset=abc", "offset"},
+		{"offset=", "offset"},
+		{"offset=1&offset=2", "offset"},
 		{"offset=-1", "offset"},
 	}
 

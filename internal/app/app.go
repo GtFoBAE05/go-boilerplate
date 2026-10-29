@@ -5,10 +5,8 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -108,7 +106,7 @@ func Run(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
-	pprofSrv := server.NewPprofServer(cfg.Pprof.Enabled, cfg.Pprof.Port, log)
+	pprofSrv := server.NewPprofServer(cfg.Pprof.Enabled, cfg.Pprof.Port)
 
 	// Each listener runs in the group; the first hard failure cancels runCtx
 	// and unblocks the shutdown path below, exactly like a signal would.
@@ -120,7 +118,7 @@ func Run(cfg *config.Config) error {
 		g.Go(func() error {
 			// A dead pprof listener costs profiling, not traffic,
 			// so it is logged rather than propagated as a group error.
-			if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := server.StartPprof(pprofSrv, log); err != nil {
 				log.Error("pprof listener failed", "error", err)
 			}
 			return nil
@@ -206,10 +204,18 @@ func setupRedis(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 	)
 	if err != nil {
 		if cfg.Redis.Mode == config.RedisModeRequired {
+			if client != nil {
+				_ = client.Close()
+			}
 			return nil, nil, noop, fmt.Errorf("connect redis (required): %w", err)
 		}
 		log.Warn("redis unreachable, running without redis-backed features", "error", err)
-		return nil, err, noop, nil
+		// Keep the client when it exists: go-redis reconnects on demand, so
+		// /readyz can recover instead of reporting a permanent degradation.
+		if client == nil {
+			return nil, err, noop, nil
+		}
+		return client, err, func() { _ = client.Close() }, nil
 	}
 
 	log.Info("connected to redis", "redis", cfg.Redis)

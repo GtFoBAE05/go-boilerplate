@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -448,7 +450,7 @@ func TestPprofNotOnPublicRouter(t *testing.T) {
 // The pprof listener binds loopback only — a routable bind would expose memory
 // contents and let any caller trigger expensive profiles.
 func TestPprofServerBindsLoopbackOnly(t *testing.T) {
-	srv := NewPprofServer(true, 6060, slog.New(slog.DiscardHandler))
+	srv := NewPprofServer(true, 6060)
 	if srv == nil {
 		// Explicit return: t.Fatal already stops the test, but the linter
 		// cannot see that and flags the derefs below.
@@ -470,9 +472,52 @@ func TestPprofServerBindsLoopbackOnly(t *testing.T) {
 // listening socket off this nil, so a non-nil return would run both. A
 // configured port is ignored while disabled.
 func TestPprofServerDisabledReturnsNil(t *testing.T) {
-	if srv := NewPprofServer(false, 6060, slog.New(slog.DiscardHandler)); srv != nil {
+	if srv := NewPprofServer(false, 6060); srv != nil {
 		t.Fatalf("want nil server when disabled, got one bound to %q", srv.Addr)
 	}
+}
+
+// A bind failure must not be reported as a running listener. This covers both
+// the public HTTP server and the private pprof server.
+func TestListenersLogOnlyAfterBind(t *testing.T) {
+	t.Run("http", func(t *testing.T) {
+		occupied, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve port: %v", err)
+		}
+		defer func() { _ = occupied.Close() }()
+
+		var logs bytes.Buffer
+		srv := newTestServerWith(t)
+		srv.log = slog.New(slog.NewJSONHandler(&logs, nil))
+		srv.http.Addr = occupied.Addr().String()
+
+		if err := srv.Start(); err == nil {
+			t.Fatal("want bind error for an occupied port")
+		}
+		if strings.Contains(logs.String(), "http server listening") {
+			t.Fatalf("logged listening before bind succeeded: %s", logs.String())
+		}
+	})
+
+	t.Run("pprof", func(t *testing.T) {
+		occupied, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve port: %v", err)
+		}
+		defer func() { _ = occupied.Close() }()
+
+		var logs bytes.Buffer
+		srv := NewPprofServer(true, 6060)
+		srv.Addr = occupied.Addr().String()
+
+		if err := StartPprof(srv, slog.New(slog.NewJSONHandler(&logs, nil))); err == nil {
+			t.Fatal("want bind error for an occupied port")
+		}
+		if strings.Contains(logs.String(), "pprof listening") {
+			t.Fatalf("logged listening before bind succeeded: %s", logs.String())
+		}
+	})
 }
 
 // Optional Redis that was unreachable at startup must report degraded without
