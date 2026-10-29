@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/repository"
 	"github.com/GtFoBAE05/go-boilerplate/internal/service"
@@ -49,12 +48,17 @@ func NewUserService(repo repository.Store, log *slog.Logger) UserService {
 	}
 }
 
+// emailUniqueConstraint is the only unique rule that means "email already
+// taken". Matching a substring would also catch unrelated future indexes whose
+// names happen to mention email.
+const emailUniqueConstraint = "users_email_lower_key"
+
 // isEmailConflict distinguishes the email rule from any other unique index on
 // users. The constraint name is a storage detail, so the inspection lives in
 // repository and the service only asks which rule fired.
 func isEmailConflict(err error) bool {
 	return repository.IsUniqueViolation(err) &&
-		strings.Contains(repository.ConstraintName(err), "email")
+		repository.ConstraintName(err) == emailUniqueConstraint
 }
 
 func (s *userService) Create(ctx context.Context, in CreateInput) (CreateOutput, error) {

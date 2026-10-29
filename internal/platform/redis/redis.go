@@ -62,7 +62,10 @@ func PoolSize(n int) Option {
 	return func(o *goredis.Options) { o.PoolSize = n }
 }
 
-// New creates a Redis client and verifies connectivity.
+// New creates a Redis client and verifies connectivity. If the initial ping
+// fails, the client is returned with the error: go-redis dials lazily, so an
+// optional caller can keep it and recover when Redis returns. A caller that
+// treats the error as fatal must Close the returned client.
 func New(ctx context.Context, addr string, opts ...Option) (*goredis.Client, error) {
 	clientOpts := &goredis.Options{Addr: addr}
 	for _, opt := range opts {
@@ -87,8 +90,7 @@ func New(ctx context.Context, addr string, opts ...Option) (*goredis.Client, err
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := client.Ping(pingCtx).Err(); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("ping redis: %w", err)
+		return client, fmt.Errorf("ping redis: %w", err)
 	}
 	return client, nil
 }

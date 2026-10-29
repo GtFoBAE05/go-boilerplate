@@ -3,8 +3,10 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"reflect"
 	"strings"
@@ -190,10 +192,15 @@ func allowedMethods(r *http.Request, router chi.Routes) string {
 // orchestrator can remove this instance from rotation before Shutdown starts.
 func (s *Server) BeginDrain() { s.health.BeginDrain() }
 
-// Start blocks until the listener fails or Shutdown is called.
+// Start blocks until the listener fails or Shutdown is called. Binding happens
+// before the "listening" log, so a failed bind never claims to be serving.
 func (s *Server) Start() error {
-	s.log.Info("http server listening", "addr", s.http.Addr)
-	if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", s.http.Addr)
+	if err != nil {
+		return fmt.Errorf("listen http: %w", err)
+	}
+	s.log.Info("http server listening", "addr", ln.Addr().String())
+	if err := s.http.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil

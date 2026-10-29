@@ -2,6 +2,9 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -166,6 +169,7 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"bad log level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 		{"bad log format", func(c *Config) { c.Log.Format = "xml" }, "log.format"},
 		{"sampler arg above 1", func(c *Config) { c.OTel.TracesSamplerArg = 1.5 }, "otel.traces_sampler_arg"},
+		{"sampler arg NaN", func(c *Config) { c.OTel.TracesSamplerArg = math.NaN() }, "otel.traces_sampler_arg"},
 		{"unknown sampler", func(c *Config) { c.OTel.TracesSampler = "jaeger_remote" }, "otel.traces_sampler"},
 		{"unknown exporter", func(c *Config) { c.OTel.MetricsExporter = "prometheus" }, "otel.metrics_exporter"},
 		// The pre-OTLP spelling: a bare host:port has no scheme, so nothing
@@ -371,6 +375,30 @@ func TestLoadMigrate(t *testing.T) {
 			t.Fatalf("LoadMigrate must ignore API-only settings: %v", err)
 		}
 	})
+	// cmd/migrate hardcodes its pool size and does not pass the statement
+	// timeouts, so an invalid value there must not block a migration.
+	t.Run("ignores unused pool settings", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvDevelopment)
+		t.Setenv("POSTGRES_DSN", "postgres://app:app@localhost:5433/app?sslmode=disable")
+		t.Setenv("POSTGRES_MAX_CONNS", "0")
+		t.Setenv("POSTGRES_MIN_CONNS", "-1")
+		t.Setenv("POSTGRES_STATEMENT_TIMEOUT", "not-a-duration")
+		t.Setenv("POSTGRES_LOCK_TIMEOUT", "not-a-duration")
+		t.Setenv("POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT", "not-a-duration")
+		if _, err := LoadMigrate(); err != nil {
+			t.Fatalf("LoadMigrate must ignore unused pool settings: %v", err)
+		}
+	})
+	t.Run("rejects settings migration uses", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("SERVICE_ENV", EnvDevelopment)
+		t.Setenv("POSTGRES_DSN", "postgres://app:app@localhost:5433/app?sslmode=disable")
+		t.Setenv("POSTGRES_MAX_CONN_LIFETIME", "-1s")
+		if _, err := LoadMigrate(); err == nil || !strings.Contains(err.Error(), "max_conn_lifetime") {
+			t.Fatalf("want max_conn_lifetime error, got %v", err)
+		}
+	})
 }
 
 func TestProductionRejectsInsecureRedisTLS(t *testing.T) {
@@ -391,8 +419,10 @@ func TestRedactDSN(t *testing.T) {
 	}{
 		{"url form", "postgres://app:s3cret@localhost:5433/app?sslmode=disable", "postgres://app:xxxxx@localhost:5433/app?sslmode=disable"},
 		{"url without password", "postgres://localhost:5433/app", "postgres://localhost:5433/app"},
+		{"url query passwords", "postgres://app:s3cret@localhost:5433/app?password=querysecret&sslpassword=sslsecret&sslmode=disable", "postgres://app:xxxxx@localhost:5433/app?password=xxxxx&sslmode=disable&sslpassword=xxxxx"},
 		{"keyword form", "host=localhost password=s3cret dbname=app", "host=localhost password=xxxxx dbname=app"},
 		{"keyword quoted", "host=localhost password='s3 cret' dbname=app", "host=localhost password=xxxxx dbname=app"},
+		{"keyword sslpassword", "host=localhost sslpassword=sslsecret dbname=app", "host=localhost sslpassword=xxxxx dbname=app"},
 		{"empty", "", ""},
 	}
 
@@ -402,8 +432,10 @@ func TestRedactDSN(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("want %q, got %q", tt.want, got)
 			}
-			if strings.Contains(got, "s3cret") || strings.Contains(got, "s3 cret") {
-				t.Fatalf("password leaked in %q", got)
+			for _, secret := range []string{"s3cret", "s3 cret", "querysecret", "sslsecret"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("password %q leaked in %q", secret, got)
+				}
 			}
 		})
 	}
@@ -422,6 +454,32 @@ func TestPostgresLogValueRedactsPassword(t *testing.T) {
 	for _, secret := range []string{"s3cret", "m3cret"} {
 		if strings.Contains(rendered, secret) {
 			t.Fatalf("password %q leaked in log value: %s", secret, rendered)
+		}
+	}
+}
+
+// Logging the whole Config must be safe even when every credential-bearing
+// section is populated, including URL query passwords and OTel userinfo.
+func TestConfigLogValueRedactsSecrets(t *testing.T) {
+	cfg := validConfig()
+	cfg.Postgres.DSN = "postgres://app:s3cret@localhost:5433/app?password=querysecret&sslpassword=sslsecret"
+	cfg.Postgres.MigrationDSN = "postgres://migrator:m3cret@localhost:5433/app?sslpassword=migssl"
+	cfg.Redis.Password = "r3dis"
+	cfg.OTel.Endpoint = "https://user:otlpsecret@collector:4317?token=otlptoken"
+	cfg.OTel.TracesEndpoint = "https://user:tracesecret@collector:4317"
+	cfg.OTel.MetricsEndpoint = "https://user:metricssecret@collector:4317"
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	logger.Info("config loaded", "config", cfg)
+
+	rendered := buf.String()
+	for _, secret := range []string{
+		"s3cret", "m3cret", "querysecret", "sslsecret", "migssl",
+		"r3dis", "otlpsecret", "otlptoken", "tracesecret", "metricssecret",
+	} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("secret %q leaked while logging *Config: %s", secret, rendered)
 		}
 	}
 }
