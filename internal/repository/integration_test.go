@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/GtFoBAE05/go-boilerplate/internal/platform/postgres"
@@ -106,8 +105,8 @@ func TestUserRepositoryCRUD(t *testing.T) {
 	if !repository.IsUniqueViolation(err) {
 		t.Fatalf("duplicate email: want unique violation, got %v", err)
 	}
-	if got := repository.ConstraintName(err); !strings.Contains(got, "email") {
-		t.Fatalf("duplicate email: want an email constraint, got %q", got)
+	if got := repository.ConstraintName(err); got != "users_email_lower_key" {
+		t.Fatalf("duplicate email: want users_email_lower_key, got %q", got)
 	}
 
 	// The lower(email) index is what makes the rule case-insensitive at the

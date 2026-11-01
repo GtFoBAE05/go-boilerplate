@@ -47,6 +47,17 @@ type metricsOptions struct {
 	interval    time.Duration
 }
 
+// Exporter constructors are variables so tests can force a partial setup
+// failure without a live collector.
+var (
+	newTraceExporter = func(ctx context.Context, opts ...otlptracegrpc.Option) (sdktrace.SpanExporter, error) {
+		return otlptracegrpc.New(ctx, opts...)
+	}
+	newMetricExporter = func(ctx context.Context, opts ...otlpmetricgrpc.Option) (sdkmetric.Exporter, error) {
+		return otlpmetricgrpc.New(ctx, opts...)
+	}
+)
+
 // WithTracing exports spans over OTLP/gRPC to endpointURL, whose scheme selects
 // transport security (http:// is insecure). See NewSampler for sampler.
 func WithTracing(endpointURL string, sampler sdktrace.Sampler) Option {
@@ -146,7 +157,7 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (shutdo
 
 	// Traces: OTLP over gRPC (Tempo or any OTLP collector).
 	if t := o.tracing; t != nil {
-		traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpointURL(t.endpointURL))
+		traceExporter, err := newTraceExporter(ctx, otlptracegrpc.WithEndpointURL(t.endpointURL))
 		if err != nil {
 			return nil, fmt.Errorf("create otlp trace exporter: %w", err)
 		}
@@ -160,7 +171,7 @@ func Setup(ctx context.Context, serviceName, env string, opts ...Option) (shutdo
 
 	// Metrics: OTLP over gRPC on a fixed interval.
 	if m := o.metrics; m != nil {
-		metricExporter, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpointURL(m.endpointURL))
+		metricExporter, err := newMetricExporter(ctx, otlpmetricgrpc.WithEndpointURL(m.endpointURL))
 		if err != nil {
 			return nil, fmt.Errorf("create otlp metric exporter: %w", err)
 		}

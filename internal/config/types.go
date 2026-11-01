@@ -118,6 +118,18 @@ type MigratePostgresConfig struct {
 	QueryExecMode         string        `mapstructure:"query_exec_mode"`
 }
 
+// LogValue redacts the DSNs for the same reason PostgresConfig does: the
+// migration job can log its config without leaking credentials.
+func (p MigratePostgresConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("dsn", platformconfig.RedactDSN(p.DSN)),
+		slog.String("migration_dsn", platformconfig.RedactDSN(p.MigrationDSN)),
+		slog.Duration("max_conn_lifetime", p.MaxConnLifetime),
+		slog.Duration("max_conn_lifetime_jitter", p.MaxConnLifetimeJitter),
+		slog.String("query_exec_mode", p.QueryExecMode),
+	)
+}
+
 // RedisMode controls how the app treats its Redis dependency.
 type RedisMode string
 
