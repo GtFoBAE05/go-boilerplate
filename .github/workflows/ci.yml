@@ -203,7 +203,7 @@ jobs:
           echo "$migrate_output" | grep -q "connect postgres" \
             || (echo "::error::migration image did not reach the postgres connect step" && exit 1)
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: go-boilerplate:ci
           format: table
@@ -212,7 +212,7 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
       - name: Scan migration image for vulnerabilities
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: go-boilerplate-migrate:ci
           format: table
@@ -221,7 +221,7 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
       - name: Scan repository for secrets and misconfiguration
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
