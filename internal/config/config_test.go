@@ -458,6 +458,21 @@ func TestPostgresLogValueRedactsPassword(t *testing.T) {
 	}
 }
 
+func TestMigratePostgresLogValueRedactsPassword(t *testing.T) {
+	p := MigratePostgresConfig{
+		DSN:           "postgres://app:s3cret@localhost:5433/app",
+		MigrationDSN:  "postgres://migrator:m3cret@localhost:5433/app",
+		QueryExecMode: "exec",
+	}
+
+	rendered := p.LogValue().String()
+	for _, secret := range []string{"s3cret", "m3cret"} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("password %q leaked in migration log value: %s", secret, rendered)
+		}
+	}
+}
+
 // Logging the whole Config must be safe even when every credential-bearing
 // section is populated, including URL query passwords and OTel userinfo.
 func TestConfigLogValueRedactsSecrets(t *testing.T) {
